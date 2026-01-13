@@ -1,0 +1,7 @@
+{
+  "name": "mnemosyne",
+  "dependencies": {
+    "ogl": "^1.0.11",
+    "react-icons": "^5.5.0"
+  }
+}

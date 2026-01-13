@@ -1,0 +1,61 @@
+name: mdn_ar
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy=1.26.4
+  - pip
+  - markupsafe
+  - jinja2
+  # Essential system dependencies
+  - ffmpeg
+  - portaudio
+  # Core ML and computer vision libraries (conda for OpenMP compatibility)
+  - conda-forge::opencv
+  # Environment handling
+  - conda-forge::python-dotenv  
+  # PyTorch and fastvlm dependencies (via pip for exact version control)
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu118
+      # PyTorch (matching fastvlm requirements)
+      - torch==2.6.0
+      - torchvision==0.21.0
+      - torchaudio
+      # fastvlm core dependencies
+      - transformers==4.48.3
+      - tokenizers==0.21.0
+      - sentencepiece==0.1.99
+      - shortuuid
+      - accelerate==1.6.0
+      - peft>=0.10.0,<0.14.0
+      - bitsandbytes
+      - pydantic
+      - markdown2[all]
+      - scikit-learn==1.2.2
+      - sentence-transformers
+      - gradio==5.11.0
+      - requests
+      - uvicorn
+      - fastapi
+      - einops==0.6.1
+      - einops-exts==0.0.4
+      - timm==1.0.15
+      - coremltools==8.2
+      # Additional dependencies (transitive dependencies that may not auto-install)
+      # FastVLM package (editable install)
+      - -e ./fastvlm
+      # Original project dependencies
+      - sounddevice
+      - soundfile
+      - easyocr
+      - openai
+      - pynput
+      - SpeechRecognition
+      - flask
+      - flask-cors
+      #filtering and AI dependencies
+      - google-generativeai
+      - dateparser
+
