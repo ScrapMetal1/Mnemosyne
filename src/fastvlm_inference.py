@@ -98,6 +98,9 @@ def _load_fastvlm():  # Define an internal function to load the FastVLM model co
 def describe_frame(frame: np.ndarray) -> str:  # Define the public function to generate a description for a given image frame
     """
     Generate a textual description of an OpenCV camera frame.
+
+
+    Note that the FastVLM processes a 1024x1024 image. That should be our target input.
     """
     _load_fastvlm()  # Ensure the model is loaded before processing
 
@@ -145,7 +148,7 @@ def describe_frame(frame: np.ndarray) -> str:  # Define the public function to g
             images=image_tensor,  # The processed image input
             image_sizes=[image.size],  # The size of the original image
             do_sample=False,  # deterministic generation
-            max_new_tokens=128,  # Maximum number of tokens to generate
+            max_new_tokens=512,  # Maximum number of tokens to generate
             use_cache=True,  # Enable KV caching for speed
         )
 
@@ -154,9 +157,17 @@ def describe_frame(frame: np.ndarray) -> str:  # Define the public function to g
     )[0].strip()
 
     # Clean up artifacts like <start>, <end>, or other special markers
-    stop_words = ["<|im_end|>", "<|im_start|>", "<end>", "<start>"]
+    stop_words = ["<|im_end|>", "<|im_start|>", "<end>", "<start>","<end of description>","<start of description>","<end of im_end>"]
     for stop in stop_words:
         if stop in output_text:
             output_text = output_text.split(stop)[0]
+
+    # Handle <Instruction> / <Response> artifacts
+    if "<Response:" in output_text:
+        # Take everything after <Response: 
+        output_text = output_text.split("<Response:")[1].strip()
+        # Remove trailing '>' if it exists (though usually it's just text)
+        if output_text.endswith(">"):
+            output_text = output_text[:-1]
 
     return output_text.strip()

@@ -264,3 +264,6 @@ tmp_*
 
 fastvlm/checkpoints/
 test_embeddings/
+
+#block all models in the folder.  
+fastvlm/llava/llava-*/
