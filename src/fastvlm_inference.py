@@ -108,8 +108,9 @@ def describe_frame(frame: np.ndarray) -> str:  # Define the public function to g
     image = Image.fromarray(frame[:, :, ::-1]).convert("RGB")  # Convert the OpenCV BGR numpy array to a PIL RGB image
 
     prompt_text = (  # Define the text prompt to guide the model's description
-        "Describe this scene concisely for a vision-impaired user. "  # Instruction for conciseness and target audience
-        "Focus on objects, people, text, and spatial layout."  # Specific elements to focus on
+        "Provide a one-sentence summary of the scene, followed by a brief list of "
+        "key people and their clothing, and any specific items or text visible. "
+        "Be objective and concise. Avoid describing walls, floors, or empty space."
     )
 
     qs = (  # Construct the query string including special image tokens
@@ -148,8 +149,11 @@ def describe_frame(frame: np.ndarray) -> str:  # Define the public function to g
             images=image_tensor,  # The processed image input
             image_sizes=[image.size],  # The size of the original image
             do_sample=False,  # deterministic generation
-            max_new_tokens=512,  # Maximum number of tokens to generate
+            temperature=0.7, # this doesn't matter if sample is set to false
+            max_new_tokens=56,  # Maximum number of tokens to generate
             use_cache=True,  # Enable KV caching for speed
+            repetition_penalty=1.1, # Help stop the model from looping on the same words
+
         )
 
     output_text = _tokenizer.batch_decode(
@@ -157,7 +161,13 @@ def describe_frame(frame: np.ndarray) -> str:  # Define the public function to g
     )[0].strip()
 
     # Clean up artifacts like <start>, <end>, or other special markers
-    stop_words = ["<|im_end|>", "<|im_start|>", "<end>", "<start>","<end of description>","<start of description>","<end of im_end>"]
+    stop_words = [
+        "<|im_end|>", "<|im_start|>", "<end>", "<start>",
+        "<end of description>", "<start of description>",
+        "<end of im_end>", "<im_end>", "<im_start>",
+        "<end of response>", "<start of response>", 
+        "Question:", "Answer:", "User:", "Assistant:", "###", "Context:", "\n"
+    ]
     for stop in stop_words:
         if stop in output_text:
             output_text = output_text.split(stop)[0]

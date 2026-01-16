@@ -166,7 +166,7 @@ class EmbeddingStore:
         # Filter by threshold
         above_threshold = similarities >= threshold
         valid_indices = valid_indices[above_threshold]
-        similarities = similarities[above_threshold]
+        similarities = similarities[above_threshold] 
         
         # Get top_k results
         if len(similarities) == 0:
@@ -181,7 +181,7 @@ class EmbeddingStore:
             results.append({
                 'id': self.ids[original_idx],
                 'text': self.metadata[original_idx]['text'],
-                'metadata': self.metadata[original_idx],
+                #'metadata': self.metadata[original_idx], just repeats text and id
                 'similarity': float(similarities[idx])
             })
         
@@ -270,7 +270,7 @@ class EmbeddingExtractor:
             print("Warning: No embedding model available. Pass 'model' and 'tokenizer' or install sentence-transformers.")
 
 
-    def extract(self, text: str) -> np.ndarray:
+    def extract_embeddings(self, text: str) -> np.ndarray:
         """
         Extract embedding from text.
         """
@@ -430,7 +430,7 @@ if __name__ == "__main__":
         
         for i, text in enumerate(descriptions):
             print(f"\n[{i+1}] Adding: {text}")
-            embedding = extractor.extract(text) #get the embedding 
+            embedding = extractor.extract_embeddings(text) #get the embedding 
             memory_id = store.add(
                 embedding=embedding,
                 text=text,
@@ -465,7 +465,7 @@ if __name__ == "__main__":
             print(f"\n[{i+1}] Query: \"{query}\"")
             
             # Extract query embedding
-            query_embedding = extractor.extract(query)
+            query_embedding = extractor.extract_embeddings(query)
             
             # Search with top_k=1
             results = store.search(query_embedding, top_k=1)
