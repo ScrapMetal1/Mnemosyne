@@ -108,7 +108,7 @@ def describe_frame(frame: np.ndarray) -> str:  # Define the public function to g
     image = Image.fromarray(frame[:, :, ::-1]).convert("RGB")  # Convert the OpenCV BGR numpy array to a PIL RGB image
 
     prompt_text = (  # Define the text prompt to guide the model's description
-        "Provide a one-sentence summary of the scene, followed by a brief list of "
+        "Provide a detailed one-sentence summary of the scene, with regard to "
         "key people and their clothing, and any specific items or text visible. "
         "Be objective and concise. Avoid describing walls, floors, or empty space."
     )
@@ -150,7 +150,7 @@ def describe_frame(frame: np.ndarray) -> str:  # Define the public function to g
             image_sizes=[image.size],  # The size of the original image
             do_sample=False,  # deterministic generation
             temperature=0.7, # this doesn't matter if sample is set to false
-            max_new_tokens=56,  # Maximum number of tokens to generate
+            max_new_tokens=128,  # Maximum number of tokens to generate
             use_cache=True,  # Enable KV caching for speed
             repetition_penalty=1.1, # Help stop the model from looping on the same words
 
