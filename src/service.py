@@ -20,6 +20,9 @@ from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 from openai import OpenAI
 
+from embedding_storage import EmbeddingStore, EmbeddingExtractor
+
+from fastvlm_inference import describe_frame, _load_fastvlm
 
 load_dotenv()
 
@@ -47,6 +50,12 @@ current_response = None
 is_speaking = False
 playback_stream = None
 
+#instantiate the classes
+extractor = EmbeddingExtractor()
+storage = EmbeddingStore()
+
+ #load fastvlm
+_load_fastvlm()
 
 def _elapsed_ms(start_time):
     return (time.perf_counter() - start_time) * 1000
@@ -297,6 +306,10 @@ def get_ai_response(prompt, metrics=None):
 def get_ai_response_streaming(prompt):
     """Returns a streaming generator for LLM response."""
     print("Thinking (streaming)...")
+
+    #determine if the primpt
+
+
     try:
         stream = client_ai.chat.completions.create(
             model="gpt-5-nano",
@@ -625,6 +638,55 @@ class CameraService:
             frame = self.current_frame.copy()
         return call_openai_vision_api(frame, use_voice=speak_result, metrics=metrics)
 
+    
+def memory_loop(): 
+    print("[Memory] Background loop started.")
+    while True:
+        try:
+            # 1. Wait for X seconds
+            time.sleep(30) 
+            
+            # 2. Get Frame from Camera
+            #Access the EXISTING service instance (Global variable)
+            global camera_service 
+
+            # 2. Ask IT for the frame safely
+            with camera_service.lock:
+                if camera_service.current_frame is None:
+                    print("[Memory] Camera is off/loading. Skipping...")
+                    continue # Skip loop iteration
+                    
+                # Get a copy so we don't mess up the main thread
+                frame = camera_service.current_frame.copy()
+
+            # 3. Describe Frame (FastVLM)
+            describe_start = time.time()
+            description = describe_frame(frame)  #fastvlm inference
+            describe_end = time.time()
+            print(description)
+            print(f'FastVLM describe',describe_end-describe_start)
+            
+            # 4. Embed & Save
+            embed_start = time.time()
+            embedding = extractor.extract_embeddings(description)
+            embed_end = time.time()
+            print(f"Embed Time:",embed_end-embed_start)
+            
+
+            store_start = time.time()
+            storage.add(embedding=embedding, text=description)
+            store_end = time.time()
+            print(f"Store Time:",store_end-store_start)
+
+
+        except Exception as e:
+            print(f"Memory Capture Loop Error: {e}")
+            time.sleep(5)
+    
+
+
+
+    
 
 camera_service = CameraService()
 
@@ -740,7 +802,7 @@ def stop_voice():
     # Stage 1: Save audio file
     save_start = time.perf_counter()
     filename = stop_recording(stream)
-    metrics["audio_save_ms"] = _elapsed_ms(save_start)
+    metrics["audio_save_ms"] = _elapsgit reset --soft HEAD~1ed_ms(save_start)
 
     if not filename:
         metrics["pipeline_total_ms"] = _elapsed_ms(pipeline_start)
@@ -859,4 +921,6 @@ def api_stop_speech():
 
 
 if __name__ == "__main__":
+    t = threading.Thread(target=memory_loop, daemon=True)
+    t.start()
     app.run(debug=True, port=5000, threaded=True)

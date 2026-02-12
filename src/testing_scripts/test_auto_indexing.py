@@ -9,8 +9,8 @@ import time
 #load the camera
 cap = cv2.VideoCapture(0)
 
-#load FastVLM weights
-_load_fastvlm()
+#load FastVLM weights not necessasry unless we want to load before we run the sim 
+#_load_fastvlm()
 
 #instantiate the classes
 extractor = EmbeddingExtractor()
