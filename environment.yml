@@ -13,9 +13,9 @@ dependencies:
   - ffmpeg
   - portaudio
   # Core ML and computer vision libraries (conda for OpenMP compatibility)
-  - conda-forge::opencv
+  #- conda-forge::opencv --> not working on my pc. pip install works
   # Environment handling
-  - conda-forge::python-dotenv  
+  - conda-forge::python-dotenv
   # PyTorch and fastvlm dependencies (via pip for exact version control)
   - pip:
       - --extra-index-url https://download.pytorch.org/whl/cu118
@@ -47,6 +47,8 @@ dependencies:
       # FastVLM package (editable install)
       - -e ./fastvlm
       # Original project dependencies
+      - opencv-python
+      - dateparser
       - sounddevice
       - soundfile
       - easyocr
@@ -57,5 +59,3 @@ dependencies:
       - flask-cors
       #filtering and AI dependencies
       - google-generativeai
-      - dateparser
-

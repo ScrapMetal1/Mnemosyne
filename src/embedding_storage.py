@@ -102,7 +102,18 @@ class EmbeddingStore:
         self.save()
         return True
 
-    def search(self, query_embedding: np.ndarray, top_k: int = 5, threshold: float = 0.0) -> List[Dict]:
+
+    def _parse_timestamp(self, timestamp_str):
+
+        """
+        Helper function for search
+        """
+        try: 
+            return datetime.fromisoformat(timestamp_str) 
+        except:
+            return datetime.min #forever ago. takes all memeories 
+    
+    def search(self, query_embedding: np.ndarray, top_k: int = 5, threshold: float = 0.0, filter: Optional[Dict] = None ) -> List[Dict]:
         """
         Search for similar embeddings using cosine similarity.
         
@@ -123,46 +134,62 @@ class EmbeddingStore:
 
         #ensure the querys embedding is in numpy format
         if isinstance(query_embedding, torch.Tensor):
+            #check if its is a tensor. if it is then convert to numpy
             query_embedding = query_embedding.detach().cpu().numpy()
+            
             #squash into 1d array
             query_embedding = np.array(query_embedding).flatten()
+            
+            
             #normalise
             norm = np.linalg.norm(query_embedding)
+            
+            
+            # Handle zero vector edge case
             if norm > 0:
                 query_embedding = query_embedding / norm
             else:
-                # Handle zero vector edge case
                 return [] 
-
-
 
         #turns all the embeddings into a 2d numpy matrix. 
         embeddings_array = np.array(self.embeddings)
 
+        
+        #TIME FILTER
+
+        valid_mask = [True] * len(self.embeddings) # boolean list 
+
+        if filter and "start_time" in filter:
+
+            start_time = filter["start_time"]
+
+            for i, memory in enumerate(self.metadata): #create counter
+                item_time = self._parse_timestamp(memory['timestamp'])
+
+
+                if item_time < start_time:
+                    valid_mask[i] = False
+            
+        valid_mask = np.array(valid_mask)
+        
+        
+        
+
+
+        #filter the emebeddings
+
+        filtered_embeddings = embeddings_array[valid_mask]
+
 
 
         # use cosine similarty to match against embedding int the database. returns a nmpy array with all the similiarty scores for each embedding. 
-        similarities = np.dot(embeddings_array, query_embedding)
-
-
-        valid_indices = np.arange(len(similarities))
-
-
-
-        #TODO later
-        #Metadata filter for TIME. Only have soft filter for time.  Start with all indicies as valid. 
-
-        # valid_indicies = np.arange(len(similarities))
-
-        # if metadata_filter:
-        #     filtered_indicies = []
-        #     for idx in valid_indicies:
-        #          meta = self.metadata[idx]
-        #          match = True
-        #          for key, value in metadata_filter.items():
-
-
+        similarities = np.dot(filtered_embeddings, query_embedding)
         
+        #make sure we keep the indicies consistent so we can find the correspoindng text
+        all_indices = np.arange(len(self.embeddings))
+
+        valid_indices = all_indices[valid_mask]
+
         # Filter by threshold
         above_threshold = similarities >= threshold
         valid_indices = valid_indices[above_threshold]
@@ -183,7 +210,7 @@ class EmbeddingStore:
                 'text': self.metadata[original_idx]['text'],
                 #'metadata': self.metadata[original_idx], just repeats text and id
                 'similarity': float(similarities[idx])
-            })
+            }) 
         
         return results
 
@@ -281,70 +308,6 @@ class EmbeddingExtractor:
             return embedding
         
 
-        #fall back on the LLM if not working: 
-
-
-        #tokenize text, tokens is a dictionary
-        if self.model is None or self.tokenizer is None:
-             raise ValueError("No model available for embedding extraction")
-
-        tokens = self.tokenizer(
-            text,
-            return_tensors = 'pt',
-            padding = True,   # if less than 512 tokens then the space will be padded
-            truncation = True, # if there is more than 512 tokens then it will be cut off
-            max_length = 2048,  # or 4096, or 8192 if this is too short. Need to check how many tokens our generated text desc is taking. 
-        ).to(self.device)
-        
-        # Extract embeddings using model's hidden states for contextual embeddings
-        with torch.no_grad():
-            outputs = self.model(
-                input_ids=tokens["input_ids"], #this is just the tokens that represent the text.
-                attention_mask=tokens["attention_mask"], #mask
-                output_hidden_states=True,
-                return_dict=True
-            )
-            # Use the last hidden state
-            last_hidden_state = outputs.hidden_states[-1] # [batch, seq_len, hidden_dim]
-            
-            # Use the embedding of the LAST token (EOS or last word) for decoder models
-            # This is often better than mean pooling for GPT-style models
-            # We gather the vector at the index of the last non-padding token
-            # 1. Calculate the index of the last real token for each sentence in the batch
-            # attention_mask is [1, 1, 1, 0, 0] -> sum is 3 -> last index is 2 (0, 1, 2)
-            sequence_lengths = tokens["attention_mask"].sum(dim=1) - 1
-
-            # 2. Create indices for the batch dimension [0, 1, 2, ...]
-            batch_indices = torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device)
-
-            # 3. Select the specific vector at [batch_idx, last_token_idx]
-            sentence_embedding = last_hidden_state[batch_indices, sequence_lengths] # returns the embeddings for each batch's last token in a 2d array
-            
-            # Squeeze if batch size is 1
-            sentence_embedding = sentence_embedding.squeeze(0) #skips if the batch size is greater than one. 
-            
-            # Convert to numpy and normalize
-            embedding = sentence_embedding.cpu().float().numpy()
-            
-            # L2 Normalization
-            if embedding.ndim == 1: # if only one batch. 
-                norm = np.linalg.norm(embedding) # magnitude
-                if norm > 0:
-                    embedding = embedding / norm #normalise - unit vector
-            else:
-                norm = np.linalg.norm(embedding, axis=1, keepdims=True) # calculates the lenght of each batch respectively. 
-                embedding = np.divide(embedding, norm, out=np.zeros_like(embedding), where=norm!=0) #divides. 
-        
-        return embedding
-
-
-
-
-
-    
-        
-
-
 # Integration example
 def create_memory_system(model, tokenizer, storage_dir="./embeddings_db"):
     """
@@ -404,7 +367,7 @@ if __name__ == "__main__":
             print("        Cannot run tests with real embeddings.")
             sys.exit(1)
 
-        # Initialize components
+        # Initialize components 
         store = EmbeddingStore(storage_dir=temp_dir)
         
         print("\n" + "-" * 70)
@@ -488,7 +451,7 @@ if __name__ == "__main__":
             else:
                  print(f"    ✗ FAILED: Expected index {expected_index} ({descriptions[expected_index]}), but got {found_index} ({result['text']})")
                  all_passed = False
-
+ 
             # Verify that we got a result with reasonable similarity
             if result['similarity'] <= 0.0:
                 print(f"    ✗ FAILED: Similarity too low: {result['similarity']:.4f}")

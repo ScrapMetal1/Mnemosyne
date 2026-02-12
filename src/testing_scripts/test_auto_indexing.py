@@ -16,34 +16,34 @@ _load_fastvlm()
 extractor = EmbeddingExtractor()
 store = EmbeddingStore()
 
-# #capture the an image every 5 seconds. 
-# for i in range(5):
-#     print("Capturing Frame")        
-#     ret, frame  = cap.read()
-#     if not ret:
-#         print("frame not captured")
+#capture the an image every 5 seconds. 
+for i in range(5):
+    print("Capturing Frame")        
+    ret, frame  = cap.read()
+    if not ret:
+        print("frame not captured")
  
-#     #describe the frame
-#     describe_start = time.time()
-#     description = describe_frame(frame)
-#     print(description)
-#     describe_end = time.time()
-#     print(f'FastVLM describe',describe_end-describe_start)
+    #describe the frame
+    describe_start = time.time()
+    description = describe_frame(frame)  #fastvlm inference
+    describe_end = time.time()
+    print(description)
+    print(f'FastVLM describe',describe_end-describe_start)
 
 
 
-#     #embed the frame
-#     embed_start = time.time()
-#     embedding = extractor.extract_embeddings(description)
-#     embed_end = time.time()
+    #embed the frame
+    embed_start = time.time()
+    embedding = extractor.extract_embeddings(description)
+    embed_end = time.time()
     
-#     print(f"Embed Time:",embed_end-embed_start)
+    print(f"Embed Time:",embed_end-embed_start)
 
-#     store.add(embedding=embedding, text=description)
+    store.add(embedding=embedding, text=description)
 
     
-#     print("sleeping")
-#     time.sleep(5)
+    print("sleeping")
+    time.sleep(5)
 
 
 
@@ -51,7 +51,6 @@ store = EmbeddingStore()
 
 #search for memories
 
-query = "What was my grandma wearing?"
 query = "Where did I leave my tape?"
 
 
