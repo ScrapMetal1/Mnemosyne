@@ -2,9 +2,10 @@ import './App.css'
 import Orb from './components/orb'
 import { useState, useEffect } from 'react'
 import { CiCamera, CiMicrophoneOn } from 'react-icons/ci'
-import { FiImage, FiMic, FiMicOff, FiStopCircle, FiActivity } from 'react-icons/fi'
+import { FiImage, FiMic, FiMicOff, FiStopCircle, FiActivity, FiAperture  } from 'react-icons/fi'
 import { cameraService } from './services/cameraService'
 import { voiceService } from './services/voiceService'
+import { memoryService} from './services/memoryService'
 
 function App() {
   const [isCameraRunning, setIsCameraRunning] = useState(false)
@@ -17,6 +18,7 @@ function App() {
   const [isSpeechActive, setIsSpeechActive] = useState(false)
   const [uiMessage, setUiMessage] = useState(null)
   const [latencyMetrics, setLatencyMetrics] = useState(null)
+  const [memoryLoading, setMemoryLoading] = useState(false)  //variable, function. Smartvariable
 
   useEffect(() => {
     checkCameraStatus()
@@ -158,6 +160,24 @@ function App() {
     }
   }
 
+  const handleSaveMemory = async() => {  //event handler
+    setMemoryLoading(true)
+
+    try {
+      const result = await memoryService.captureMemory()
+      if (result.status === 'success'){
+        setUiMessage(`Memory saved: ${result.description}`)
+      } else{
+        setUiMessage(`Error: ${result.message}`)
+      }
+    }catch (err){
+      setUiMessage("Could not save memory.")
+
+    }finally {
+      setMemoryLoading(false)
+    }
+  }
+
   const formatMs = (ms) => {
     if (ms === undefined || ms === null) return '—'
     return `${Math.round(ms)}ms`
@@ -232,9 +252,18 @@ function App() {
                   <FiImage />
                   Describe &amp; speak
                 </button>
+                <button
+                  className="pill-button outline"
+                  onClick={handleSaveMemory}
+                  disabled= {!isCameraRunning || memoryLoading} //prevents double clicking
+                >
+                  <FiAperture /> {/* Or maybe a different icon? */}
+                  Save Memory
+                </button>
               </div>
               {analysisLoading && <p className="hint">Analyzing scene…</p>}
             </div>
+
 
             <div className="card control-card">
               <div className="card-header">
