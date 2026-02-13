@@ -21,8 +21,9 @@ from flask_cors import CORS
 from openai import OpenAI
 
 from embedding_storage import EmbeddingStore, EmbeddingExtractor
-
 from fastvlm_inference import describe_frame, _load_fastvlm
+from filtering import requires_memory_recall, extract_time_filter
+ 
 
 load_dotenv()
 
@@ -56,6 +57,8 @@ storage = EmbeddingStore()
 
  #load fastvlm
 _load_fastvlm()
+
+
 
 def _elapsed_ms(start_time):
     return (time.perf_counter() - start_time) * 1000
@@ -291,7 +294,7 @@ def get_ai_response(prompt, metrics=None):
         response = client_ai.chat.completions.create(
             model="gpt-5-nano",
             messages=[
-                {"role": "system", "content": "You are a helpful personal assistant."},
+                {"role": "system", "content": "You are a helpful personal assistant. Be concise"},
                 {"role": "user", "content": prompt},
             ],
         )
@@ -307,14 +310,45 @@ def get_ai_response_streaming(prompt):
     """Returns a streaming generator for LLM response."""
     print("Thinking (streaming)...")
 
-    #determine if the primpt
+    #determine if the prompt requires memory recall
 
+    if requires_memory_recall(prompt):
+
+        start_time = extract_time_filter(prompt)
+
+        #embed the prompt
+        prompt_embedding = extractor.extract_embeddings(prompt)
+
+        #find memories
+        if start_time:
+            relevant_memories = storage.search(prompt_embedding, top_k=5, filter={'start_time': start_time})
+        else:
+            relevant_memories = storage.search(prompt_embedding, top_k=5)
+
+
+        #create context string
+        #memories are stored as dictionaries --> [{'id': 'memory_1770887664.831047_1', 'text': 'I am a fresh memory from today.', 'similarity': 11.11815348206726},{next memory dict...}]
+        context_str = ""
+        for mem in relevant_memories:
+            context_str += f"- {mem['text']} (at {mem['timestamp']})\n" # new line for each memory
+
+        system_prompt = "You are a helpful personal assistant with access to past memories. Be concise in your response"
+        
+        #input the context into the system prompt. Might need to change this later for chat context memory. 
+        if context_str:
+            system_prompt += f"\n\nCONTEXT FROM MEMORY:\n{context_str}"
+    
+    else: 
+        system_prompt = "You are a helpful personal assistant. Be concise in your response"
+
+    
+    #call the llm with whatever system prompt we got. 
 
     try:
         stream = client_ai.chat.completions.create(
             model="gpt-5-nano",
             messages=[
-                {"role": "system", "content": "You are a helpful personal assistant."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
             stream=True,
@@ -324,6 +358,7 @@ def get_ai_response_streaming(prompt):
         print(f"[ERROR] Error creating stream: {e}")
         raise
 
+        
 
 def get_ai_response_with_vision(voice_text, frame, metrics=None):
     """Get AI response using Vision API with user's voice question and current frame."""
@@ -639,6 +674,63 @@ class CameraService:
         return call_openai_vision_api(frame, use_voice=speak_result, metrics=metrics)
 
     
+## MEMORY FUNCTIONS
+
+
+def capture_memory_snapshot():
+    try:        
+        # Get Frame from Camera
+        # Access the EXISTING service instance (Global variable)
+        global camera_service 
+
+        # 2. Ask IT for the frame safely
+        with camera_service.lock: #this makes sure we dont capture a half written frame
+            if camera_service.current_frame is None:
+                print("[Memory] Camera is off/loading. Skipping...")
+                return {"status": "error, cant capture camera frame"}
+                
+            # Get a copy so we don't mess up the main thread
+            frame = camera_service.current_frame.copy()
+
+        # 3. Describe Frame (FastVLM)
+        describe_start = time.time()
+        description = describe_frame(frame)  #fastvlm inference
+        describe_end = time.time()
+        print(description)
+        print(f"FastVLM describe time: {(describe_end-describe_start) * 1000:.2f}ms")
+        
+        # 4. Embed & Save
+        embed_start = time.time()
+        embedding = extractor.extract_embeddings(description)
+        embed_end = time.time()
+        print(f"Embedding_time_ms: {(embed_end-embed_start) * 1000:.2f}ms") 
+        
+
+        store_start = time.time()
+        storage.add(embedding=embedding, text=description)
+        store_end = time.time()
+        print(f"Store Time: {(store_end-store_start) * 1000:.2f}ms") 
+
+
+        return {
+            "status": "success",
+            "description": description, 
+            "FastVLM describe time": (describe_end - describe_start) * 1000,
+            "Embedding_time_ms": (embed_end - embed_start) * 1000,
+            "Store Time:": (store_end - store_start) * 1000
+
+
+        }
+
+
+    except Exception as e:
+        print(f"Manual Memory Capture Error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+
+
+
 def memory_loop(): 
     print("[Memory] Background loop started.")
     while True:
@@ -802,7 +894,7 @@ def stop_voice():
     # Stage 1: Save audio file
     save_start = time.perf_counter()
     filename = stop_recording(stream)
-    metrics["audio_save_ms"] = _elapsgit reset --soft HEAD~1ed_ms(save_start)
+    metrics["audio_save_ms"] = _elapsed_ms(save_start)
 
     if not filename:
         metrics["pipeline_total_ms"] = _elapsed_ms(pipeline_start)
@@ -813,8 +905,12 @@ def stop_voice():
         }), 400
 
     # Stage 2: Transcription
+    
     transcribe_start = time.perf_counter()
+    
     user_text = transcribe_audio(filename, metrics=metrics)
+    
+    
     if os.path.exists(FILENAME):
         os.remove(FILENAME)
 
@@ -864,7 +960,7 @@ def stop_voice():
     with response_lock:
         current_response = payload
 
-    # Log summary
+    # Log summary on backend terminal
     print(f"\n{'='*60}")
     print(f"📊 PIPELINE METRICS SUMMARY")
     print(f"{'='*60}")
@@ -920,7 +1016,12 @@ def api_stop_speech():
     })
 
 
+@app.route("/api/memory/capture", methods=["POST"])
+def manual_capture():
+    return jsonify(capture_memory_snapshot())
+
+
 if __name__ == "__main__":
-    t = threading.Thread(target=memory_loop, daemon=True)
-    t.start()
+    #t = threading.Thread(target=memory_loop, daemon=True)
+    #t.start()
     app.run(debug=True, port=5000, threaded=True)
