@@ -209,7 +209,8 @@ class EmbeddingStore:
                 'id': self.ids[original_idx],
                 'text': self.metadata[original_idx]['text'],
                 #'metadata': self.metadata[original_idx], just repeats text and id
-                'similarity': float(similarities[idx])
+                'similarity': float(similarities[idx]),
+                'timestamp': self.metadata[original_idx]['timestamp']
             }) 
         
         return results
@@ -307,6 +308,7 @@ class EmbeddingExtractor:
             embedding = self.st_model.encode(text, convert_to_numpy=True, normalize_embeddings=True)
             return embedding
         
+
 
 # Integration example
 def create_memory_system(model, tokenizer, storage_dir="./embeddings_db"):

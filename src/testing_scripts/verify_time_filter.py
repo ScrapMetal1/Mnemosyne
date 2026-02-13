@@ -55,6 +55,7 @@ def test_time_filter():
     results = store.search(vec_new, top_k=5, filter={'start_time': start_time})
     
     print(f"Found {len(results)} results.")
+    print(results)
     
     passed = True
     if len(results) != 1:

@@ -30,14 +30,15 @@ def requires_memory_recall(prompt: str) -> bool:
                 "You are a binary classifier. Your task is to determine if a user prompt "
                 "requires retrieving personal memories, past interactions, or specific user-related context "
                 "stored in a memory database. General knowledge questions or creative writing tasks do NOT require memory recall. "
-                "Reply ONLY with 'YES' or 'NO'."
+                "Reply ONLY with 'True' or 'False'."
             )
         )
         
         response = model.generate_content(f"User Prompt: '{prompt}'")
+        
         text = response.text.strip().upper()
         
-        return "YES" in text # if 'Yes' is in text then it returns TRUE
+        return "TRUE" in text or "YES" in text  #this returns a boolean
         
     except Exception as e:
         print(f"Error calling Gemini API in filtering.py: {e}")

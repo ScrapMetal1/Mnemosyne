@@ -31,8 +31,7 @@ for i in range(5):
     print(f'FastVLM describe',describe_end-describe_start)
 
 
-
-    #embed the frame
+    #embed the description
     embed_start = time.time()
     embedding = extractor.extract_embeddings(description)
     embed_end = time.time()
