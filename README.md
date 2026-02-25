@@ -1,6 +1,6 @@
 # Mnemosyne
 
-Mnemosyne is a personal project with the goal of creating an AI assistant with perfect memory recall that eventually could be deployed onto smart glasses / AR Glasses for general users and people with disabilities. It currently includes a real-time webcam OCR prototype with voice assistant features, capturing frames from a camera, detecting and recognizing text on-device, and overlaying results.
+Mnemosyne is a personal project with the goal of creating an AI assistant with perfect memory recall that eventually could be deployed onto smart glasses / AR Glasses for general users and people with disabilities. It features a React-based frontend for real-time webcam capture and voice assistant features, connected to a Python backend handling vision analysis, text-to-speech, and memory extraction.
 
 ---
 
@@ -14,32 +14,23 @@ Mnemosyne is a personal project with the goal of creating an AI assistant with p
    ```
 2. **Set up environment variables** (see [API Keys Setup](#api-keys-setup))
 3. **Create the conda environment** (see [Environment Setup](#environment-setup))
-4. **Run the applications**
+4. **Run the backend server**
 
    ```bash
-   # Main OCR app
-   python src/main.py
-
-   # Voice assistant app
-   python src/voice_reg.py
-
-   # Merged app (OCR + voice features)
-   python src/merged_functions.py
+   conda activate mdn_ar
+   python src/service.py
    ```
 
-   Press `q` to quit, `s` to save a snapshot.
+5. **Run the React frontend**
 
-### React UI (Optional)
+   Open a new terminal window:
+   ```bash
+   cd react_ui
+   npm install
+   npm run dev
+   ```
 
-For the React frontend interface:
-
-```bash
-cd react_ui
-npm install
-npm run dev
-```
-
-This starts a development server with hot module replacement. The React UI provides an alternative interface to the Python applications.
+   Open your browser to the local URL provided by Vite (e.g., `http://localhost:5173`).
 
 ---
 
@@ -49,7 +40,7 @@ This starts a development server with hot module replacement. The React UI provi
 * Conda (Anaconda or Miniconda) - **must be added to PATH**
 * Webcam (internal or USB)
 * API keys for OpenAI and ElevenLabs (see [API Keys Setup](#api-keys-setup))
-* Node.js 16+ and npm (optional, for React UI development)
+* Node.js 16+ and npm (required for the React UI)
 
 ---
 
@@ -82,17 +73,7 @@ If conda commands don't work, restart your terminal/command prompt or run the ap
 2. Choose **`environment.yml`** from the repo root
 3. Name it **`mdn_ar`** and click **Import**
 4. When it completes, click the **play ▶** icon → **Open Terminal**
-5. Run one of the applications:
-
-   ```bash
-   python src/main.py          # Basic OCR
-   python src/voice_reg.py     # Voice assistant
-   python src/merged_functions.py    # Full featured app
-   ```
-
-If you do not see the environment, refresh Navigator or close and reopen it.
-
----
+5. Start the backend: `python src/service.py`
 
 ### Option B — Conda CLI (Recommended for Team Members)
 
@@ -174,110 +155,35 @@ ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
 
 ---
 
-## Portable Build (Optional)
+## Run the App
 
-Create a zip you can copy to another machine with the **same** OS and architecture.
+You need to run both the Python backend and the React frontend simultaneously in separate terminals.
 
-```bash
-conda install -n mdn_ar -c conda-forge conda-pack
-conda activate mdn_ar
-conda pack -n mdn_ar -o mdn_ar_env.tar.gz
-```
-
-On the target machine:
-
-```bash
-mkdir mdn_ar_env
-tar -xzf mdn_ar_env.tar.gz -C mdn_ar_env
-# Linux/macOS
-mdn_ar_env/bin/conda-unpack && source mdn_ar_env/bin/activate
-# Windows (PowerShell)
-mdn_ar_env\Scripts\conda-unpack.exe; mdn_ar_env\Scripts\activate
-python src/main.py
-```
-
-To make Navigator see it, place the unpacked folder under your Conda `envs` directory or add its path to `~/.condarc` under `envs_dirs`.
-
----
-
-## Environment Files
-
-### `environment.yml`
-
-```yaml
-name: mdn_ar
-channels:
-  - conda-forge
-  - defaults
-dependencies:
-  - python=3.11
-  - numpy
-  - pip
-  # Essential system dependencies only
-  - ffmpeg
-  - portaudio
-  # All Python packages via pip for maximum compatibility
-  - pip:
-      # PyTorch - automatically detects CUDA availability
-      - torch
-      - torchvision
-      - torchaudio
-      # Other dependencies
-      - opencv-python
-      - easyocr
-      - openai
-      - sounddevice
-      - soundfile
-      - pynput
-      - elevenlabs
-      - SpeechRecognition
-      - flask
-      - flask-cors
-      - python-dotenv
-```
-
-### Exact Lockfile (Optional)
-
-Produce a bit‑for‑bit spec for this OS:
-
-```bash
-conda list --explicit > spec.txt
-# recreate with
-conda create -n mdn_ar --file spec.txt
-```
-
----
-
-## Run the Apps
-
+**Terminal 1 (Backend):**
 ```bash
 conda activate mdn_ar
-
-# Choose your application:
-python src/main.py          # Basic OCR with webcam overlay
-python src/voice_reg.py     # Push-to-talk voice assistant
-python src/merged_functions.py    # Combined OCR + voice features
+python src/service.py
 ```
+This will start the Flask server on `http://localhost:5000`.
 
-**Keys:** `q` quit • `s` save frame • `p` voice recording (in voice apps).
-If the camera window is black, edit the respective `.py` file and try `VideoCapture(1)` or `VideoCapture(2)`.
+**Terminal 2 (Frontend):**
+```bash
+cd react_ui
+npm run dev
+```
+Navigate to the local URL (usually `http://localhost:5173`) in your web browser. Ensure you grant camera and microphone permissions when prompted.
 
 ---
 
 ## What You Should See
 
-### OCR Applications (`main.py`, `merged_functions.py`):
-* A window titled **"Mnemosyne - Webcam OCR"**
-* Green polygons around detected text
-* Label with recognised string and a confidence score (0–1)
-* An FPS counter in the top‑left
-
-### Voice Applications (`voice_reg.py`, `merged_functions.py`):
-* Console output showing "Push-to-Talk Assistant Ready"
-* Audio feedback when recording starts/stops
-* AI responses played through speakers
-
-Point the camera at a book page, a menu, or your monitor for OCR features.
+In your browser, you will see the **MDN Assist** interface:
+* A live video feed from your webcam (if the camera is started)
+* Status chips indicating Camera, Microphone, and Speech status
+* **Scene controls** to analyze the camera feed or save memories
+* **Voice assistant** controls to talk to the AI, optionally with scene context
+* An **AI scene description** panel showing the latest vision analysis
+* A **Voice transcript & response** panel showing your speech and the AI's response
 
 ---
 
@@ -290,48 +196,37 @@ Mnemosyne/
 ├── README.md                # This file
 ├── LICENSE
 ├── src/
-│   ├── main.py              # Basic OCR webcam application
-│   ├── voice_reg.py         # Push-to-talk voice assistant
-│   ├── merged_functions.py  # Combined OCR + voice features
-│   ├── testing11labs.py     # ElevenLabs API testing script
-│   ├── __pycache__/         # Python cache files (gitignored)
-│   └── temp_recording.wav   # Temporary audio file (gitignored)
-└── react_ui/                # React frontend (separate application)
+│   ├── service.py           # Main Flask backend server
+│   ├── fastvlm_inference.py # Vision/Language model processing
+│   ├── embedding_storage.py # Memory embeddings and retrieval
+│   ├── filtering.py         # Query filtering logic
+│   ├── legacy_code/         # Older python-only scripts
+│   └── testing_scripts/     # Various test scripts
+└── react_ui/                # React frontend application
     ├── package.json
     ├── vite.config.js
-    ├── src/
-    │   ├── App.jsx
-    │   ├── main.jsx
-    │   └── assets/
-    └── public/
+    └── src/                 # React components, services, and assets
 ```
 
 ---
 
 ## How It Works
 
-### OCR Applications (`main.py`, `merged_functions.py`):
-1. OpenCV captures frames from the webcam in real-time
-2. EasyOCR performs optical character recognition on each frame
-3. Text detection results are overlaid as green polygons with confidence scores
-4. FPS counter tracks performance in the top-left corner
-5. Press 's' to save snapshots, 'q' to quit
+### Architecture
+The application has been refactored into a client-server architecture:
+1. **Frontend (React UI)**: Handles all local hardware interactions (webcam video capture and microphone audio streaming) within the browser.
+2. **Backend (Python/Flask)**: Serves as the AI processing engine, handling LLM requests, vision APIs, and long-term memory operations.
 
-### Voice Applications (`voice_reg.py`, `merged_functions.py`):
-1. Continuous audio stream monitoring using sounddevice
-2. Push-to-talk activation (hold 'p' key) or continuous listening modes
-3. Speech recognition converts audio to text using Google's API
-4. OpenAI processes the text for intelligent responses
-5. ElevenLabs generates natural-sounding speech from AI responses
-6. Audio playback through system speakers
-
-### Combined Features (`merged_functions.py`):
-- All OCR functionality plus voice interaction
-- AI can describe what it sees in the camera feed
-- Voice commands can control OCR behavior
-- Integrated Flask server for potential web interface
-
-You can tweak language packs, confidence thresholds, and OCR frequency to trade accuracy for speed.
+### Core Features:
+1. **Webcam Capture**: The React UI uses the browser's MediaDevices API to capture real-time frames from the webcam.
+2. **Scene Analysis**: The frontend captures a frame as a base64 string and sends it to the backend (`service.py`), which uses the OpenAI Vision API (or local models like FastVLM) to analyze and describe the scene.
+3. **Voice Interaction**: 
+   - Audio is recorded in the browser and sent to the backend.
+   - The backend transcribes the audio using OpenAI's Whisper API.
+   - The transcribed text (along with optional image context) is sent to the LLM.
+   - The backend streams the AI's text response back to the frontend using Server-Sent Events (SSE).
+   - Text-to-Speech (TTS) chunks are generated and streamed back to the frontend for real-time playback.
+4. **Memory Capture**: The system can capture snapshots, analyze them, generate embeddings, and store them locally for future recall.
 
 ---
 
@@ -340,16 +235,6 @@ You can tweak language packs, confidence thresholds, and OCR frequency to trade 
 **Conda command not found:**
 - Ensure conda is installed and added to PATH (see [Environment Setup](#environment-setup))
 - Restart your terminal/command prompt
-- On Windows, run `conda init` and restart
-
-**Torch/EasyOCR install fails:**
-- For CPU-only systems: The environment.yml should handle this automatically
-- For GPU systems: Follow the CUDA installation steps in [Environment Setup](#environment-setup)
-- Alternative manual install:
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pip install easyocr
-```
 
 **API Key errors:**
 - Ensure `.env` file exists in project root
@@ -357,27 +242,13 @@ pip install easyocr
 - Verify keys are active on respective platforms
 - Restart application after adding keys
 
-**Webcam busy or black frame:**
-- Close other camera-using applications
-- Try different camera indices: `VideoCapture(1)` or `VideoCapture(2)`
-- Check camera permissions on macOS/Linux
+**Webcam or Microphone not working:**
+- Ensure you have granted permission in your web browser for the site to access your camera and microphone.
+- Close other applications that might be using the camera.
 
-**Audio/microphone issues:**
-- Ensure microphone permissions are granted
-- Check audio device settings
-- Try different audio devices if multiple are available
-- On Windows, ensure correct audio drivers
-
-**Low FPS:**
-- Lower camera resolution in the source code
-- Run OCR every N frames instead of every frame
-- Downscale frames before OCR processing
-- Use CPU-only PyTorch if GPU performance is poor
-
-**CUDA not detected:**
-- Install NVIDIA CUDA drivers from NVIDIA website
-- Verify CUDA installation: `nvidia-smi`
-- Reinstall PyTorch with CUDA support if needed
+**Backend not responding (CORS or Connection Error):**
+- Ensure `python src/service.py` is actively running in a terminal.
+- Verify the backend is listening on the expected port (usually `5000`).
 
 ---
 
@@ -385,44 +256,27 @@ pip install easyocr
 
 * Branch naming: `feat/…`, `fix/…`, `docs/…`
 * Make small, focused pull requests
-* Test all three applications before pushing: OCR, voice assistant, and merged app
 * Ensure `.env` files are never committed (add to `.gitignore` if missing)
-
-### Coding Style
-
-* Keep functions small and pure where possible
-* Prefer clear names over comments
-* Add docstrings to all new functions
-* Use type hints where beneficial
-* Follow PEP 8 style guidelines
-
-### Environment Management
-
-* Update `environment.yml` when adding new dependencies
-* Test environment creation on both GPU and CPU systems
-* Document any special setup requirements in this README
 
 ### PR Checklist
 
-* [ ] All applications run locally: `python src/main.py`, `python src/voice_reg.py`, `python src/merged_functions.py`
+* [ ] Applications run locally (`service.py` and React UI)
 * [ ] No secrets or large files committed (check `.env`, audio files, etc.)
 * [ ] README updated if user-facing changes
-* [ ] Environment setup tested on clean conda environment
-* [ ] API keys properly documented for new team members
-* [ ] Screenshots/GIFs for UI changes (optional)
 
 ---
 
 ## Roadmap
 
-* [x] Basic OCR with webcam overlay
+* [x] Basic OCR with webcam overlay (legacy)
 * [x] Voice recognition and push-to-talk
 * [x] AI chat integration (OpenAI)
-* [x] Text-to-speech (ElevenLabs)
+* [x] Text-to-speech (ElevenLabs / OpenAI TTS)
+* [x] React UI integration with Flask backend
+* [x] Frontend handling of video capture
 * [ ] Confidence filtering and text de-duplication
 * [ ] Run-every-N-frames toggle for performance
 * [ ] Offline translation capabilities
-* [ ] React UI integration with Flask backend
 * [ ] Mobile deployment (Android ML Kit)
 * [ ] AR glasses UX overlays (Unity/AR Foundation)
 * [ ] Multi-language OCR support
@@ -432,42 +286,10 @@ pip install easyocr
 
 ## Security & Privacy
 
-* All OCR processing happens on-device - no images are uploaded
-* Voice data is processed locally before sending to APIs
 * API keys are stored securely in local `.env` files only
 * Never commit `.env` files or share API keys
-* Audio recordings are temporary and deleted after processing
-* Camera feed is not recorded unless explicitly saved with 's' key
-
-**Important:** Do not commit snapshots containing personal data or sensitive information.
-
----
-
-## Applications Overview
-
-### `main.py` - Basic OCR
-- Real-time webcam text detection
-- Green polygon overlays on detected text
-- Confidence scores and FPS display
-- Simple snapshot saving
-
-### `voice_reg.py` - Voice Assistant
-- Push-to-talk voice interaction
-- OpenAI-powered responses
-- ElevenLabs text-to-speech
-- Keyboard-activated recording
-
-### `testing11labs.py` - ElevenLabs Testing
-- Simple script to test ElevenLabs text-to-speech functionality
-- Useful for verifying API key setup and audio output
-- Plays a sample voice message when run
-
-### `merged_functions.py` - Full Featured App
-- Combines OCR and voice features
-- AI can describe camera contents
-- Voice commands for OCR control
-- Flask server for potential web interface
-- Most complete feature set
+* Camera feed is only captured and sent to the API when explicitly requested by the user
+* Ensure you do not commit snapshots containing personal data or sensitive information.
 
 ---
 
@@ -480,12 +302,10 @@ MIT
 ## Acknowledgements
 
 * [OpenCV](https://opencv.org/) - Computer vision library
-* [EasyOCR](https://github.com/JaidedAI/EasyOCR) - Optical character recognition
 * [PyTorch](https://pytorch.org/) - Machine learning framework
-* [OpenAI](https://openai.com/) - AI chat capabilities
-* [ElevenLabs](https://elevenlabs.io/) - Text-to-speech synthesis
-* [Google Speech Recognition](https://pypi.org/project/SpeechRecognition/) - Voice recognition
+* [OpenAI](https://openai.com/) - AI chat capabilities and TTS
+* [React](https://reactjs.org/) & [Vite](https://vitejs.dev/) - Frontend framework
 
 ---
 
-## This README is ai generated because why not? 
+## This README is ai generated because why not?

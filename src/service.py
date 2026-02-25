@@ -8,6 +8,10 @@ import logging
 import cv2
 import numpy as np
 import json
+import threading
+import queue
+import concurrent.futures
+import re
 
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -300,61 +304,82 @@ def process_voice():
         # Yield the transcript first
         yield f"data: {json.dumps({'type': 'transcript', 'text': user_text})}\n\n"
 
-        buffer = ""
-        full_response = ""
-        sentence_count = 0
-        
-        for chunk in llm_generator:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta.content or ""
-            if not delta:
-                continue
-            
-            full_response += delta
-            buffer += delta
-            
-            import re
-            parts = re.split(r'(?<=[.?!])\s+', buffer)
-            if len(parts) > 1:
-                for part in parts[:-1]:
-                    if part.strip():
-                        # Yield the text chunk
-                        yield f"data: {json.dumps({'type': 'text', 'text': part.strip()})}\n\n"
-                        
-                        # Generate TTS for this sentence
-                        try:
-                            audio_response = client_ai.audio.speech.create(
-                                model="tts-1",
-                                voice="alloy",
-                                input=part.strip(),
-                                response_format="mp3"
-                            )
-                            audio_base64 = base64.b64encode(audio_response.content).decode('utf-8')
-                            yield f"data: {json.dumps({'type': 'audio', 'audio': audio_base64})}\n\n"
-                        except Exception as e:
-                            print(f"TTS Error on chunk: {e}")
-                
-                buffer = parts[-1]
+        # Queue to pass (text_chunk, tts_future) from background thread to main generator
+        out_queue = queue.Queue()
+        # Thread pool to fetch TTS concurrently
+        tts_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
-        # Flush remaining buffer
-        if buffer.strip():
-            yield f"data: {json.dumps({'type': 'text', 'text': buffer.strip()})}\n\n"
+        def fetch_tts(text_chunk):
+            """Runs in background thread pool to fetch audio"""
             try:
                 audio_response = client_ai.audio.speech.create(
                     model="tts-1",
                     voice="alloy",
-                    input=buffer.strip(),
+                    input=text_chunk,
                     response_format="mp3"
                 )
-                audio_base64 = base64.b64encode(audio_response.content).decode('utf-8')
-                yield f"data: {json.dumps({'type': 'audio', 'audio': audio_base64})}\n\n"
+                return base64.b64encode(audio_response.content).decode('utf-8')
             except Exception as e:
-                print(f"TTS Error on flush: {e}")
+                print(f"TTS Error on chunk: {e}")
+                return None
 
-        # Signal completion
-        metrics["pipeline_total_ms"] = _elapsed_ms(pipeline_start)
-        yield f"data: {json.dumps({'type': 'done', 'metrics': metrics, 'full_response': full_response})}\n\n"
+        def llm_worker():
+            """Runs in a background thread to consume the LLM stream without blocking"""
+            buffer = ""
+            full_response_parts = []
+            
+            for chunk in llm_generator:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content or ""
+                if not delta:
+                    continue
+                
+                full_response_parts.append(delta)
+                buffer += delta
+                
+                parts = re.split(r'(?<=[.?!,])\s+', buffer)
+                if len(parts) > 1:
+                    for part in parts[:-1]:
+                        text_chunk = part.strip()
+                        if text_chunk:
+                            # Start TTS generation IMMEDIATELY in parallel
+                            future = tts_executor.submit(fetch_tts, text_chunk)
+                            out_queue.put(("chunk", text_chunk, future))
+                    
+                    buffer = parts[-1]
+
+            # Flush remaining buffer
+            if buffer.strip():
+                text_chunk = buffer.strip()
+                future = tts_executor.submit(fetch_tts, text_chunk)
+                out_queue.put(("chunk", text_chunk, future))
+
+            # Signal completion
+            out_queue.put(("done", "".join(full_response_parts), None))
+
+        # Start LLM processing in the background
+        threading.Thread(target=llm_worker).start()
+
+        # Main thread consumes the queue and yields SSEs in order
+        while True:
+            msg_type, content, future = out_queue.get()
+            
+            if msg_type == "done":
+                metrics["pipeline_total_ms"] = _elapsed_ms(pipeline_start)
+                yield f"data: {json.dumps({'type': 'done', 'metrics': metrics, 'full_response': content})}\n\n"
+                break
+            
+            # 1. Yield text immediately so frontend can display it instantly
+            yield f"data: {json.dumps({'type': 'text', 'text': content})}\n\n"
+            
+            # 2. Wait for the TTS generation for THIS specific chunk to finish
+            if future:
+                audio_b64 = future.result() 
+                if audio_b64:
+                    yield f"data: {json.dumps({'type': 'audio', 'audio': audio_b64})}\n\n"
+
+        tts_executor.shutdown(wait=False)
 
     return Response(stream_with_context(generate_sse()), mimetype='text/event-stream')
 
