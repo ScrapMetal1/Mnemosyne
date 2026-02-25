@@ -1,6 +1,6 @@
-// Camera service for communicating with the Flask backend
+// Camera service for communicating with the Flask backend and managing local camera
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = '/api';
 
 const formatMetrics = (metrics) => {
   if (!metrics) return '';
@@ -20,68 +20,39 @@ const logLatency = (label, start, metrics) => {
 
 export const cameraService = {
   /**
-   * Start the camera
+   * Start the local camera
    */
   async startCamera() {
     try {
-      const start = performance.now();
-      const response = await fetch(`${API_BASE_URL}/camera/start`, {
-        method: 'POST',
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "environment", // Prefer back camera on mobile
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false // Audio is handled separately
       });
-      const data = await response.json();
-      logLatency('camera/start', start, data.metrics);
-      return data;
+      return { status: 'success', stream };
     } catch (error) {
-      console.error('Error starting camera:', error);
-      throw error;
+      console.error('Error starting local camera:', error);
+      return { status: 'error', message: error.message || error.name };
     }
   },
 
   /**
-   * Stop the camera
+   * Stop the local camera stream
    */
-  async stopCamera() {
-    try {
-      const start = performance.now();
-      const response = await fetch(`${API_BASE_URL}/camera/stop`, {
-        method: 'POST',
-      });
-      const data = await response.json();
-      logLatency('camera/stop', start, data.metrics);
-      return data;
-    } catch (error) {
-      console.error('Error stopping camera:', error);
-      throw error;
+  stopCamera(stream) {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
     }
+    return { status: 'success' };
   },
 
   /**
-   * Get camera status
+   * Analyze the scene with Vision API using a captured frame
    */
-  async getCameraStatus() {
-    try {
-      const start = performance.now();
-      const response = await fetch(`${API_BASE_URL}/camera/status`);
-      const data = await response.json();
-      logLatency('camera/status', start, data.metrics);
-      return data;
-    } catch (error) {
-      console.error('Error getting camera status:', error);
-      throw error;
-    }
-  },
-
-  /**
-   * Get current frame URL
-   */
-  getFrameUrl() {
-    return `${API_BASE_URL}/camera/frame?t=${Date.now()}`;
-  },
-
-  /**
-   * Analyze the scene with Vision API
-   */
-  async analyzeScene(options = {}) {
+  async analyzeScene(imageBase64, options = {}) {
     try {
       const start = performance.now();
       const response = await fetch(`${API_BASE_URL}/scene/analyze`, {
@@ -90,6 +61,7 @@ export const cameraService = {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          image: imageBase64,
           speak: Boolean(options.speak),
         }),
       });

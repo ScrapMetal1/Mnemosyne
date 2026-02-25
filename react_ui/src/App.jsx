@@ -1,6 +1,6 @@
 import './App.css'
 import Orb from './components/orb'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { CiCamera, CiMicrophoneOn } from 'react-icons/ci'
 import { FiImage, FiMic, FiMicOff, FiStopCircle, FiActivity, FiAperture  } from 'react-icons/fi'
 import { cameraService } from './services/cameraService'
@@ -9,7 +9,9 @@ import { memoryService} from './services/memoryService'
 
 function App() {
   const [isCameraRunning, setIsCameraRunning] = useState(false)
-  const [cameraFrameUrl, setCameraFrameUrl] = useState(null)
+  const [cameraStream, setCameraStream] = useState(null)
+  const videoRef = useRef(null)
+
   const [sceneAnalysis, setSceneAnalysis] = useState('')
   const [analysisLoading, setAnalysisLoading] = useState(false)
   const [voiceResult, setVoiceResult] = useState(null)
@@ -18,22 +20,24 @@ function App() {
   const [isSpeechActive, setIsSpeechActive] = useState(false)
   const [uiMessage, setUiMessage] = useState(null)
   const [latencyMetrics, setLatencyMetrics] = useState(null)
-  const [memoryLoading, setMemoryLoading] = useState(false)  //variable, function. Smartvariable
+  const [memoryLoading, setMemoryLoading] = useState(false)
 
+  // Attach stream to video element when it changes
   useEffect(() => {
-    checkCameraStatus()
-  }, [])
-
-  useEffect(() => {
-    if (!isCameraRunning) {
-      setCameraFrameUrl(null)
-      return
+    if (videoRef.current && cameraStream) {
+      videoRef.current.srcObject = cameraStream;
+      videoRef.current.play().catch(e => console.error("Video play error:", e));
     }
-    const interval = setInterval(() => {
-      setCameraFrameUrl(cameraService.getFrameUrl())
-    }, 150)
-    return () => clearInterval(interval)
-  }, [isCameraRunning])
+  }, [cameraStream]);
+
+  // Clean up camera on unmount
+  useEffect(() => {
+    return () => {
+      if (cameraStream) {
+        cameraService.stopCamera(cameraStream);
+      }
+    };
+  }, [cameraStream]);
 
   useEffect(() => {
     if (!isRecording && !isSpeechActive) return
@@ -41,11 +45,12 @@ function App() {
       try {
         const status = await voiceService.getVoiceStatus()
         if (typeof status.is_speaking === 'boolean') {
-          setIsSpeechActive(status.is_speaking)
+          // Commented out to prevent conflict with local speech active state
+          // setIsSpeechActive(status.is_speaking)
         }
         if (typeof status.is_recording === 'boolean' && !status.is_recording) {
-          setIsRecording(false)
-          setRecordingMode(null)
+          // setIsRecording(false)
+          // setRecordingMode(null)
         }
       } catch (error) {
         console.error('Error fetching voice status:', error)
@@ -54,24 +59,16 @@ function App() {
     return () => clearInterval(interval)
   }, [isRecording, isSpeechActive])
 
-  const checkCameraStatus = async () => {
-    try {
-      const status = await cameraService.getCameraStatus()
-      setIsCameraRunning(status.is_running)
-    } catch (error) {
-      console.error('Error checking camera status:', error)
-      setUiMessage('Unable to reach camera service. Is the Flask server running?')
-    }
-  }
-
   const handleCameraToggle = async () => {
     try {
       if (isCameraRunning) {
-        await cameraService.stopCamera()
+        cameraService.stopCamera(cameraStream)
+        setCameraStream(null)
         setIsCameraRunning(false)
       } else {
         const result = await cameraService.startCamera()
         if (result.status === 'success') {
+          setCameraStream(result.stream)
           setIsCameraRunning(true)
         } else {
           setUiMessage(result.message || 'Unable to start camera')
@@ -79,14 +76,42 @@ function App() {
       }
     } catch (error) {
       console.error('Error toggling camera:', error)
-      setUiMessage('Error talking to camera service. Check that the backend is running.')
+      setUiMessage(`Camera error: ${error.message || error.name || 'Unknown error'}`)
     }
+  }
+
+  // Helper to capture a frame from the video element
+  const captureFrame = () => {
+    if (!videoRef.current || !isCameraRunning) {
+      console.warn("captureFrame failed: videoRef or isCameraRunning is falsy");
+      return null;
+    }
+    const width = videoRef.current.videoWidth;
+    const height = videoRef.current.videoHeight;
+    
+    if (!width || !height) {
+      console.warn("captureFrame failed: video dimensions are zero", { width, height });
+      return null;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(videoRef.current, 0, 0, width, height);
+    // Get base64 string, remove the data:image/jpeg;base64, prefix for the backend
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+    return dataUrl.split(',')[1];
   }
 
   const handleAnalyze = async (shouldSpeak = false) => {
     setAnalysisLoading(true)
     try {
-      const result = await cameraService.analyzeScene({ speak: shouldSpeak })
+      const imageBase64 = captureFrame();
+      if (!imageBase64) {
+        throw new Error("No camera frame available");
+      }
+      const result = await cameraService.analyzeScene(imageBase64, { speak: shouldSpeak })
       setSceneAnalysis(result.analysis)
       if (shouldSpeak) {
         setIsSpeechActive(true)
@@ -121,33 +146,81 @@ function App() {
       }
     } catch (error) {
       console.error('Error starting voice recording:', error)
-      setUiMessage('Microphone error. Check permissions and backend logs.')
+      setUiMessage(`Mic error: ${error.message || error.name || 'Unknown error'}`)
     }
   }
 
   const handleVoiceStop = async () => {
     try {
       setUiMessage('Processing...')
-      const result = await voiceService.stopVoice()
-      console.log('Voice stop result:', result)
-      console.log('Metrics received:', result.metrics)
+      let imageBase64 = null;
+      if (recordingMode === 'scene') {
+        imageBase64 = captureFrame();
+      }
+      
       setIsRecording(false)
       setRecordingMode(null)
-      if (result.status === 'success' && result.data) {
-        setVoiceResult(result.data)
-        setIsSpeechActive(true)
-        // Store the metrics - they're in the result directly
+      
+      let currentResponse = '';
+      setVoiceResult({ transcript: '...', response: '', mode: recordingMode });
+      setIsSpeechActive(true);
+
+      let audioQueue = [];
+      let isPlaying = false;
+
+      const playNextAudio = () => {
+        if (audioQueue.length === 0) {
+          isPlaying = false;
+          return;
+        }
+        isPlaying = true;
+        const audio = audioQueue.shift();
+        audio.onended = playNextAudio;
+        audio.play().catch(e => {
+          console.error("Audio playback error:", e);
+          playNextAudio(); // Skip to next if there's an error
+        });
+      };
+
+      const result = await voiceService.stopVoice(imageBase64, (event) => {
+         if (event.type === 'transcript') {
+             setVoiceResult(prev => ({ ...prev, transcript: event.text }));
+         } else if (event.type === 'text') {
+             currentResponse += event.text + ' ';
+             setVoiceResult(prev => ({ ...prev, response: currentResponse }));
+         } else if (event.type === 'audio') {
+             const audio = new window.Audio('data:audio/mp3;base64,' + event.audio);
+             audioQueue.push(audio);
+             if (!isPlaying) {
+               playNextAudio();
+             }
+         }
+      })
+      
+      console.log('Voice stop result:', result)
+      
+      if (result.status === 'success') {
+        const checkDoneInterval = setInterval(() => {
+          if (!isPlaying && audioQueue.length === 0) {
+            clearInterval(checkDoneInterval);
+            setIsSpeechActive(false);
+          }
+        }, 500);
+
         if (result.metrics) {
-          console.log('Setting latency metrics:', result.metrics)
           setLatencyMetrics(result.metrics)
         }
         setUiMessage(null)
       } else {
         setUiMessage(result.message || 'No response generated.')
+        setIsSpeechActive(false)
       }
     } catch (error) {
       console.error('Error stopping voice recording:', error)
       setUiMessage('Could not process the recording. Please try again.')
+      setIsRecording(false)
+      setRecordingMode(null)
+      setIsSpeechActive(false)
     }
   }
 
@@ -160,19 +233,22 @@ function App() {
     }
   }
 
-  const handleSaveMemory = async() => {  //event handler
+  const handleSaveMemory = async() => {
     setMemoryLoading(true)
-
     try {
-      const result = await memoryService.captureMemory()
+      const imageBase64 = captureFrame();
+      if (!imageBase64) {
+        throw new Error("No camera frame available");
+      }
+      const result = await memoryService.captureMemory(imageBase64)
       if (result.status === 'success'){
         setUiMessage(`Memory saved: ${result.description}`)
       } else{
         setUiMessage(`Error: ${result.message}`)
       }
     }catch (err){
-      setUiMessage("Could not save memory.")
-
+      console.error("Save memory error:", err);
+      setUiMessage(`Could not save memory: ${err.message || "Unknown error"}`)
     }finally {
       setMemoryLoading(false)
     }
@@ -198,7 +274,7 @@ function App() {
             </div>
             <div className="status-text">
               <p className="eyebrow">MDN Assist</p>
-              <h1>Hello Steve</h1>
+              <h1>Hello User</h1>
               <div className="chip-row">
                 <span className={`status-chip ${isCameraRunning ? 'on' : ''}`}>
                   <CiCamera /> {isCameraRunning ? 'Camera live' : 'Camera idle'}
@@ -255,15 +331,14 @@ function App() {
                 <button
                   className="pill-button outline"
                   onClick={handleSaveMemory}
-                  disabled= {!isCameraRunning || memoryLoading} //prevents double clicking
+                  disabled= {!isCameraRunning || memoryLoading}
                 >
-                  <FiAperture /> {/* Or maybe a different icon? */}
+                  <FiAperture />
                   Save Memory
                 </button>
               </div>
               {analysisLoading && <p className="hint">Analyzing scene…</p>}
             </div>
-
 
             <div className="card control-card">
               <div className="card-header">
@@ -280,6 +355,7 @@ function App() {
                 <button
                   className={`pill-button primary ${recordingMode === 'scene' ? 'active' : ''}`}
                   onClick={() => handleVoiceStart('scene')}
+                  disabled={!isCameraRunning}
                 >
                   <FiImage /> Talk w/ scene
                 </button>
@@ -301,7 +377,6 @@ function App() {
             </div>
           </div>
 
-          {/* Latency Metrics Card */}
           {latencyMetrics && Object.keys(latencyMetrics).length > 0 && (
             <div className="card metrics-card">
               <div className="card-header">
@@ -379,9 +454,15 @@ function App() {
 
         <section className="preview-panel">
           <div className="preview-inner">
-            {isCameraRunning && cameraFrameUrl ? (
-              <img src={cameraFrameUrl} alt="Camera feed" />
-            ) : (
+            <video 
+              ref={videoRef} 
+              autoPlay 
+              playsInline 
+              muted 
+              onLoadedMetadata={() => videoRef.current && videoRef.current.play()}
+              style={{ width: '100%', height: '100%', objectFit: 'cover', visibility: isCameraRunning ? 'visible' : 'hidden' }}
+            />
+            {!isCameraRunning && (
               <div className="preview-placeholder">
                 <CiCamera />
                 <p>Start the camera to view the live feed.</p>

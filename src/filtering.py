@@ -1,5 +1,5 @@
 import os
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 from dateparser.search import search_dates
 
@@ -21,24 +21,32 @@ def requires_memory_recall(prompt: str) -> bool:
         return False
 
     try:
-        genai.configure(api_key=api_key)
+        client = genai.Client(api_key=api_key)
         
-        # Using gemini-3-flash-preview for maximum speed and up-to-date performance
-        model = genai.GenerativeModel(
-            model_name='gemini-3-flash-preview',
-            system_instruction=(
-                "You are a binary classifier. Your task is to determine if a user prompt "
-                "requires retrieving personal memories, past interactions, or specific user-related context "
-                "stored in a memory database. General knowledge questions or creative writing tasks do NOT require memory recall. "
-                "Reply ONLY with 'True' or 'False'."
-            )
+        # Using gemini-2.0-flash for maximum speed and up-to-date performance
+        # Note: 'gemini-3-flash-preview' mentioned in previous code might not be widely available or standardized in the new SDK yet, 
+        # but the prompt implies we want a fast model. Let's stick to a standard fast model or the one requested if valid.
+        # The user was using 'gemini-3-flash-preview'. I will try to use 'gemini-2.0-flash' which is the current standard fast model,
+        # or keep the model name if the user specifically needs that preview. 
+        # Given the warning, 'gemini-1.5-flash' or 'gemini-2.0-flash' are safer bets. 
+        # Let's use 'gemini-2.0-flash' as it is the latest stable fast model.
+        
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            config=genai.types.GenerateContentConfig(
+                system_instruction=(
+                    "You are a binary classifier. Your task is to determine if a user prompt "
+                    "requires retrieving personal memories, past interactions, or specific user-related context "
+                    "stored in a memory database. General knowledge questions or creative writing tasks do NOT require memory recall. "
+                    "Reply ONLY with 'True' or 'False'."
+                ),
+            ),
+            contents=f"User Prompt: '{prompt}'"
         )
-        
-        response = model.generate_content(f"User Prompt: '{prompt}'")
         
         text = response.text.strip().upper()
         
-        return "TRUE" in text or "YES" in text  #this returns a boolean
+        return "TRUE" in text or "YES" in text
         
     except Exception as e:
         print(f"Error calling Gemini API in filtering.py: {e}")

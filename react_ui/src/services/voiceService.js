@@ -1,4 +1,6 @@
-const API_BASE_URL = 'http://localhost:5000/api';
+// Voice service for managing local MediaRecorder and communicating with Flask
+
+const API_BASE_URL = '/api';
 
 const formatMetrics = (metrics) => {
   if (!metrics) return '';
@@ -16,45 +18,120 @@ const logLatency = (label, start, metrics) => {
   console.log(`[latency] ${label}: total ${elapsed.toFixed(1)} ms${suffix}`);
 };
 
+let mediaRecorder = null;
+let audioChunks = [];
+let localStream = null;
+let currentMode = 'plain';
+
 export const voiceService = {
   /**
-   * Start voice recording
+   * Start local voice recording
    */
   async startVoice(mode = 'plain') {
     try {
-      const start = performance.now();
-      const response = await fetch(`${API_BASE_URL}/voice/start`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ mode }),
-      });
-      const data = await response.json();
-      logLatency(`voice/start:${mode}`, start, data.metrics);
-      return data;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      localStream = stream;
+      audioChunks = [];
+      
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunks.push(event.data);
+        }
+      };
+      
+      mediaRecorder.start();
+      currentMode = mode;
+      
+      return { status: 'success' };
     } catch (error) {
       console.error('Error starting voice recording:', error);
-      throw error;
+      return { status: 'error', message: error.message || error.name };
     }
   },
 
   /**
-   * Stop voice recording
+   * Stop local voice recording and send to backend
    */
-  async stopVoice() {
-    try {
-      const start = performance.now();
-      const response = await fetch(`${API_BASE_URL}/voice/stop`, {
-        method: 'POST',
-      });
-      const data = await response.json();
-      logLatency('voice/stop', start, data.metrics);
-      return data;
-    } catch (error) {
-      console.error('Error stopping voice recording:', error);
-      throw error;
+  async stopVoice(imageBase64 = null, onEvent) {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      return { status: 'error', message: 'Not recording' };
     }
+
+    return new Promise((resolve, reject) => {
+      mediaRecorder.onstop = async () => {
+        try {
+          // Detect the actual mime type the browser recorded with
+          const mimeType = mediaRecorder.mimeType || 'audio/webm';
+          const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+          const audioBlob = new Blob(audioChunks, { type: mimeType });
+          
+          if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+            localStream = null;
+          }
+
+          const formData = new FormData();
+          formData.append('audio', audioBlob, `recording.${ext}`);
+          formData.append('mode', currentMode);
+          
+          if (currentMode === 'scene' && imageBase64) {
+            formData.append('image', imageBase64);
+          }
+
+          const start = performance.now();
+          const response = await fetch(`${API_BASE_URL}/voice/process`, {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!response.ok || !response.body) {
+             throw new Error(`Server returned ${response.status}`);
+          }
+          
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          let finalResult = { status: 'success', data: { mode: currentMode }, metrics: {} };
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // keep the last incomplete chunk in buffer
+            
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (onEvent) onEvent(data);
+
+                  if (data.type === 'transcript') {
+                     finalResult.data.transcript = data.text;
+                  } else if (data.type === 'done') {
+                     finalResult.metrics = data.metrics;
+                     finalResult.data.response = data.full_response;
+                  }
+                } catch (e) {
+                  console.error("Error parsing SSE JSON:", e);
+                }
+              }
+            }
+          }
+
+          logLatency('voice/process_stream', start, finalResult.metrics);
+          resolve(finalResult);
+        } catch (error) {
+          console.error('Error processing voice:', error);
+          reject(error);
+        }
+      };
+
+      mediaRecorder.stop();
+    });
   },
 
   /**
