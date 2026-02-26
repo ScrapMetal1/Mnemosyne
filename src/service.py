@@ -38,6 +38,10 @@ log.setLevel(logging.WARNING)
 extractor = EmbeddingExtractor()
 storage = EmbeddingStore()
 
+# Ensure the image storage directory exists
+IMAGE_DIR = os.path.join(storage.storage_dir, "images")
+os.makedirs(IMAGE_DIR, exist_ok=True)
+
 #load fastvlm
 _load_fastvlm()
 
@@ -118,32 +122,76 @@ def call_openai_vision_api(frame, user_question=None, metrics=None):
 def get_ai_response_streaming(prompt):
     """Returns a streaming generator for LLM response."""
     print("Thinking (streaming)...")
+    
+    # Number of memories to retrieve. Defaults to 5 in the underlying EmbeddingStore if not provided.
+    top_k = 1
 
     if requires_memory_recall(prompt):
+        print(f"\n[DEBUG] Memory recall triggered for prompt: '{prompt}'")
+        
+        #Find a start time to Filter our for time
         start_time = extract_time_filter(prompt)
+        if start_time:
+            print(f"[DEBUG] Applied time filter: > {start_time}")
+        
+        #Embed the prompt
         prompt_embedding = extractor.extract_embeddings(prompt)
 
+        #Search for relvent memories filtering out distant memories if requried. 
         if start_time:
-            relevant_memories = storage.search(prompt_embedding, top_k=5, filter={'start_time': start_time})
+            relevant_memories = storage.search(prompt_embedding, top_k=top_k, filter={'start_time': start_time})
         else:
-            relevant_memories = storage.search(prompt_embedding, top_k=5)
+            relevant_memories = storage.search(prompt_embedding, top_k=top_k)
+
+        print(f"[DEBUG] Found {len(relevant_memories)} relevant memories.")
 
         context_str = ""
-        for mem in relevant_memories:
+        retrieved_images = [] # We'll store any base64 images we find here
+        
+        for i, mem in enumerate(relevant_memories):
+            print(f"  [{i+1}] Memory ID: {mem['id']} | Similarity: {mem.get('similarity', 0.0):.4f} | Text: '{mem['text']}'")
             context_str += f"- {mem['text']} (at {mem['timestamp']})\n"
+            
+            # 1. Look for the corresponding image on disk using the memory's ID
+            image_path = os.path.join(IMAGE_DIR, f"{mem['id']}.jpg")
+            if os.path.exists(image_path):
+                print(f"      -> Found corresponding image on disk")
+                # 2. If the file exists, read it from the disk
+                img = cv2.imread(image_path)
+                
+                # 3. Convert the cv2 image back into a base64 string so we can send it to OpenAI
+                _, buffer = cv2.imencode('.jpg', img)
+                img_base64 = base64.b64encode(buffer).decode('utf-8')
+                retrieved_images.append(img_base64)
+            else:
+                print(f"      -> No image found on disk for this memory")
 
         system_prompt = "You are a helpful personal assistant with access to past memories. Be concise in your response"
         if context_str:
             system_prompt += f"\n\nCONTEXT FROM MEMORY:\n{context_str}"
     else: 
+        print(f"\n[DEBUG] Memory recall NOT triggered for prompt: '{prompt}'")
         system_prompt = "You are a helpful personal assistant. Be concise in your response"
+        retrieved_images = []
+
+    # Prepare the user content payload
+    # By default, we always send the text prompt
+    user_content = [{"type": "text", "text": prompt}]
+    
+    # If we retrieved any images from memory, attach them to the payload!
+    for img_b64 in retrieved_images:
+        user_content.append({
+            "type": "image_url", 
+            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
+        })
 
     try:
         stream = client_ai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
+                # We send the array of text+images if we have images, otherwise just send the prompt string
+                {"role": "user", "content": user_content if len(user_content) > 1 else prompt},
             ],
             stream=True,
         )
@@ -192,8 +240,8 @@ def capture_memory_snapshot(frame_base64):
     try:        
         frame = base64_to_cv2(frame_base64)
         
-        # DEBUG: Save the frame to disk to verify what the backend is seeing
-        cv2.imwrite("debug_latest_memory.jpg", frame)
+        ## DEBUG: Save the frame to disk to verify what the backend is seeing
+        #cv2.imwrite("debug_latest_memory.jpg", frame)
 
         describe_start = time.time()
         description = describe_frame(frame)  #fastvlm inference
@@ -205,7 +253,13 @@ def capture_memory_snapshot(frame_base64):
         embed_end = time.time()
         
         store_start = time.time()
-        storage.add(embedding=embedding, text=description)
+        #Save the embedding and get the unique memory_id (e.g. memory_17000000_1)
+        memory_id = storage.add(embedding=embedding, text=description) 
+        
+        #Save the image to the disk using the memory_id as the filename.
+        #This writes the cv2 'frame' out as a .jpg file in the IMAGE_DIR folder we made at the top.
+        image_path = os.path.join(IMAGE_DIR, f"{memory_id}.jpg")
+        cv2.imwrite(image_path, frame)
         store_end = time.time()
 
         return {

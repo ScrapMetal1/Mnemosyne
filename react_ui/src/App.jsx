@@ -273,7 +273,7 @@ function App() {
               />
             </div>
             <div className="status-text">
-              <p className="eyebrow">MDN Assist</p>
+              <p className="eyebrow">Mnemosyne</p>
               <h1>Hello User</h1>
               <div className="chip-row">
                 <span className={`status-chip ${isCameraRunning ? 'on' : ''}`}>
