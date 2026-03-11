@@ -1,11 +1,19 @@
 import './App.css'
-import Orb from './components/orb'
 import { useState, useEffect, useRef } from 'react'
-import { CiCamera, CiMicrophoneOn } from 'react-icons/ci'
-import { FiImage, FiMic, FiMicOff, FiStopCircle, FiActivity, FiAperture  } from 'react-icons/fi'
 import { cameraService } from './services/cameraService'
 import { voiceService } from './services/voiceService'
-import { memoryService} from './services/memoryService'
+import { memoryService } from './services/memoryService'
+
+import statusBg from './assets/status.svg'
+import listeningBg from './assets/listeningcont.svg'
+import speakBg from './assets/speakcont.svg'
+import sceneControlBg from './assets/scenecontrolcont.svg'
+import sceneItemBg from './assets/scenecontitem.svg'
+import cameraIcon from './assets/camera.svg'
+import micIcon from './assets/microphone.svg'
+import describeIcon from './assets/describe.svg'
+import descNSpeakIcon from './assets/descnspeak.svg'
+import memoryIcon from './assets/memory.svg'
 
 function App() {
   const [isCameraRunning, setIsCameraRunning] = useState(false)
@@ -80,7 +88,6 @@ function App() {
     }
   }
 
-  // Helper to capture a frame from the video element
   const captureFrame = () => {
     if (!videoRef.current || !isCameraRunning) {
       console.warn("captureFrame failed: videoRef or isCameraRunning is falsy");
@@ -88,7 +95,7 @@ function App() {
     }
     const width = videoRef.current.videoWidth;
     const height = videoRef.current.videoHeight;
-    
+
     if (!width || !height) {
       console.warn("captureFrame failed: video dimensions are zero", { width, height });
       return null;
@@ -99,7 +106,6 @@ function App() {
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(videoRef.current, 0, 0, width, height);
-    // Get base64 string, remove the data:image/jpeg;base64, prefix for the backend
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
     return dataUrl.split(',')[1];
   }
@@ -139,8 +145,8 @@ function App() {
       if (result.status === 'success') {
         setIsRecording(true)
         setRecordingMode(mode)
-        setLatencyMetrics(null) // Clear previous metrics
-        setUiMessage(`Listening (${mode === 'scene' ? 'scene aware' : 'standard'})…`)
+        setLatencyMetrics(null)
+        setUiMessage(null)
       } else {
         setUiMessage(result.message || 'Unable to start recording')
       }
@@ -157,10 +163,10 @@ function App() {
       if (recordingMode === 'scene') {
         imageBase64 = captureFrame();
       }
-      
+
       setIsRecording(false)
       setRecordingMode(null)
-      
+
       let currentResponse = '';
       setVoiceResult({ transcript: '...', response: '', mode: recordingMode });
       setIsSpeechActive(true);
@@ -178,27 +184,27 @@ function App() {
         audio.onended = playNextAudio;
         audio.play().catch(e => {
           console.error("Audio playback error:", e);
-          playNextAudio(); // Skip to next if there's an error
+          playNextAudio();
         });
       };
 
       const result = await voiceService.stopVoice(imageBase64, (event) => {
-         if (event.type === 'transcript') {
-             setVoiceResult(prev => ({ ...prev, transcript: event.text }));
-         } else if (event.type === 'text') {
-             currentResponse += event.text + ' ';
-             setVoiceResult(prev => ({ ...prev, response: currentResponse }));
-         } else if (event.type === 'audio') {
-             const audio = new window.Audio('data:audio/mp3;base64,' + event.audio);
-             audioQueue.push(audio);
-             if (!isPlaying) {
-               playNextAudio();
-             }
-         }
+        if (event.type === 'transcript') {
+          setVoiceResult(prev => ({ ...prev, transcript: event.text }));
+        } else if (event.type === 'text') {
+          currentResponse += event.text + ' ';
+          setVoiceResult(prev => ({ ...prev, response: currentResponse }));
+        } else if (event.type === 'audio') {
+          const audio = new window.Audio('data:audio/mp3;base64,' + event.audio);
+          audioQueue.push(audio);
+          if (!isPlaying) {
+            playNextAudio();
+          }
+        }
       })
-      
+
       console.log('Voice stop result:', result)
-      
+
       if (result.status === 'success') {
         const checkDoneInterval = setInterval(() => {
           if (!isPlaying && audioQueue.length === 0) {
@@ -233,7 +239,7 @@ function App() {
     }
   }
 
-  const handleSaveMemory = async() => {
+  const handleSaveMemory = async () => {
     setMemoryLoading(true)
     try {
       const imageBase64 = captureFrame();
@@ -241,235 +247,131 @@ function App() {
         throw new Error("No camera frame available");
       }
       const result = await memoryService.captureMemory(imageBase64)
-      if (result.status === 'success'){
+      if (result.status === 'success') {
         setUiMessage(`Memory saved: ${result.description}`)
-      } else{
+      } else {
         setUiMessage(`Error: ${result.message}`)
       }
-    }catch (err){
+    } catch (err) {
       console.error("Save memory error:", err);
       setUiMessage(`Could not save memory: ${err.message || "Unknown error"}`)
-    }finally {
+    } finally {
       setMemoryLoading(false)
     }
   }
 
-  const formatMs = (ms) => {
-    if (ms === undefined || ms === null) return '—'
-    return `${Math.round(ms)}ms`
+  const aiDisplayText = (voiceResult?.response && voiceResult.response.trim())
+    || sceneAnalysis
+    || ''
+
+  const handleSpeakToggle = () => {
+    if (isRecording && recordingMode === 'plain') {
+      handleVoiceStop()
+    } else {
+      handleVoiceStart('plain')
+    }
   }
 
   return (
     <div className="app-root">
-      <div className="glass-shell">
-        <section className="primary-panel">
-          <header className="status-header">
-            <div className="orb-wrapper">
-              <Orb
-                hoverIntensity={0.5}
-                rotateOnHover
-                hue={0}
-                forceHoverState={isCameraRunning || isRecording || isSpeechActive}
-              />
-            </div>
-            <div className="status-text">
-              <p className="eyebrow">Mnemosyne</p>
-              <h1>Hello User</h1>
-              <div className="chip-row">
-                <span className={`status-chip ${isCameraRunning ? 'on' : ''}`}>
-                  <CiCamera /> {isCameraRunning ? 'Camera live' : 'Camera idle'}
-                </span>
-                <span className={`status-chip ${isRecording ? 'on' : ''}`}>
-                  <CiMicrophoneOn /> {isRecording ? 'Listening' : 'Standing by'}
-                </span>
-                <span className={`status-chip ${isSpeechActive ? 'on' : ''}`}>
-                  <FiStopCircle /> {isSpeechActive ? 'Speaking' : 'Silent'}
-                </span>
-              </div>
-            </div>
-            <div className="header-actions">
-              <button
-                className={`pill-button primary ${isCameraRunning ? 'active' : ''}`}
-                onClick={handleCameraToggle}
-              >
-                <CiCamera />
-                {isCameraRunning ? 'Stop Camera' : 'Start Camera'}
-              </button>
-              <button
-                className={`pill-button outline ${isRecording ? 'active' : ''}`}
-                onClick={() => handleVoiceStart('plain')}
-              >
-                <CiMicrophoneOn />
-                {isRecording && recordingMode === 'plain' ? 'Stop Listening' : 'Talk'}
-              </button>
-            </div>
-          </header>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className={`camera-bg${isCameraRunning ? ' visible' : ''}`}
+        onLoadedMetadata={() => videoRef.current && videoRef.current.play()}
+      />
 
-          <div className="controls-grid">
-            <div className="card control-card">
-              <div className="card-header">
-                <span>Scene controls</span>
-                <p className="muted">Analyze the camera feed with AI vision.</p>
-              </div>
-              <div className="control-buttons">
-                <button
-                  className="pill-button outline"
-                  onClick={() => handleAnalyze(false)}
-                  disabled={!isCameraRunning || analysisLoading}
-                >
-                  <FiImage />
-                  Describe scene
-                </button>
-                <button
-                  className="pill-button outline"
-                  onClick={() => handleAnalyze(true)}
-                  disabled={!isCameraRunning || analysisLoading}
-                >
-                  <FiImage />
-                  Describe &amp; speak
-                </button>
-                <button
-                  className="pill-button outline"
-                  onClick={handleSaveMemory}
-                  disabled= {!isCameraRunning || memoryLoading}
-                >
-                  <FiAperture />
-                  Save Memory
-                </button>
-              </div>
-              {analysisLoading && <p className="hint">Analyzing scene…</p>}
-            </div>
-
-            <div className="card control-card">
-              <div className="card-header">
-                <span>Voice assistant</span>
-                <p className="muted">Start a conversation or add scene context.</p>
-              </div>
-              <div className="control-buttons voice">
-                <button
-                  className={`pill-button primary ${recordingMode === 'plain' ? 'active' : ''}`}
-                  onClick={() => handleVoiceStart('plain')}
-                >
-                  <FiMic /> Talk
-                </button>
-                <button
-                  className={`pill-button primary ${recordingMode === 'scene' ? 'active' : ''}`}
-                  onClick={() => handleVoiceStart('scene')}
-                  disabled={!isCameraRunning}
-                >
-                  <FiImage /> Talk w/ scene
-                </button>
-                <button
-                  className="pill-button outline"
-                  onClick={handleVoiceStop}
-                  disabled={!isRecording}
-                >
-                  <FiMicOff /> Stop recording
-                </button>
-                <button
-                  className="pill-button ghost"
-                  onClick={handleStopSpeech}
-                  disabled={!isSpeechActive}
-                >
-                  <FiStopCircle /> Stop speech
-                </button>
-              </div>
-            </div>
+      <div className="overlay">
+        {/* Top Left: Welcome + Status + AI response */}
+        <div className="top-left">
+          <h1 className="welcome-title">Welcome Back, Rez</h1>
+          <p className="status-label">Status:</p>
+          <div
+            className="status-cont"
+            style={{ backgroundImage: `url(${statusBg})` }}
+          >
+            <button
+              className={`icon-btn${isCameraRunning ? ' active' : ''}`}
+              onClick={handleCameraToggle}
+              title="Toggle Camera"
+            >
+              <img src={cameraIcon} alt="Camera" />
+            </button>
+            <button
+              className={`icon-btn${isRecording ? ' active' : ''}`}
+              onClick={handleSpeakToggle}
+              title="Toggle Microphone"
+            >
+              <img src={micIcon} alt="Microphone" />
+            </button>
           </div>
-
-          {latencyMetrics && Object.keys(latencyMetrics).length > 0 && (
-            <div className="card metrics-card">
-              <div className="card-header">
-                <span><FiActivity /> Pipeline Latency</span>
-                {latencyMetrics.time_to_first_audio_ms !== undefined && (
-                  <span className="metric-highlight">
-                    ⚡ {formatMs(latencyMetrics.time_to_first_audio_ms)} to first audio
-                  </span>
-                )}
-              </div>
-              <div className="metrics-grid">
-                <div className="metric-item">
-                  <span className="metric-label">Audio Save</span>
-                  <span className="metric-value">{formatMs(latencyMetrics.audio_save_ms)}</span>
-                </div>
-                <div className="metric-item">
-                  <span className="metric-label">Transcription</span>
-                  <span className="metric-value">{formatMs(latencyMetrics.transcription_ms)}</span>
-                </div>
-                <div className="metric-item">
-                  <span className="metric-label">LLM First Token</span>
-                  <span className="metric-value">{formatMs(latencyMetrics.llm_first_token_ms)}</span>
-                </div>
-                <div className="metric-item">
-                  <span className="metric-label">First Sentence</span>
-                  <span className="metric-value">{formatMs(latencyMetrics.first_sentence_ms)}</span>
-                </div>
-                <div className="metric-item">
-                  <span className="metric-label">First TTS Ready</span>
-                  <span className="metric-value">{formatMs(latencyMetrics.first_tts_ready_ms)}</span>
-                </div>
-                <div className="metric-item primary">
-                  <span className="metric-label">Time to First Audio</span>
-                  <span className="metric-value">{formatMs(latencyMetrics.time_to_first_audio_ms)}</span>
-                </div>
-                <div className="metric-item">
-                  <span className="metric-label">Text Generation</span>
-                  <span className="metric-value">{formatMs(latencyMetrics.total_text_generation_ms)}</span>
-                </div>
-                <div className="metric-item">
-                  <span className="metric-label">Total Pipeline</span>
-                  <span className="metric-value">{formatMs(latencyMetrics.pipeline_total_ms)}</span>
-                </div>
-              </div>
-            </div>
+          {aiDisplayText && (
+            <p className="ai-response">{aiDisplayText}</p>
           )}
+        </div>
 
-          <div className="card analysis-card">
-            <div className="card-header">
-              <span>AI scene description</span>
-            </div>
-            <p className={sceneAnalysis ? '' : 'muted'}>
-              {sceneAnalysis || 'Request an analysis to receive a concise description here.'}
-            </p>
-          </div>
+        {/* Top Right: Listening container — fades in when recording */}
+        <div
+          className={`listening-cont${isRecording ? ' visible' : ''}`}
+          style={{ backgroundImage: `url(${listeningBg})` }}
+        >
+          <p className="listening-title">Listening...</p>
+          <p className="transcript-text">
+            {voiceResult?.transcript && voiceResult.transcript !== '...'
+              ? voiceResult.transcript
+              : ''}
+          </p>
+        </div>
 
-          <div className="card voice-card">
-            <div className="card-header">
-              <span>Voice transcript &amp; response</span>
-            </div>
-            {voiceResult ? (
-              <>
-                <p className="label">
-                  Heard ({voiceResult.mode === 'scene' ? 'scene aware' : 'standard'}):
-                </p>
-                <p className="bubble">{voiceResult.transcript}</p>
-                <p className="label">Assistant said:</p>
-                <p className="bubble">{voiceResult.response}</p>
-              </>
-            ) : (
-              <p className="muted">Ask something with the Talk buttons to see responses here.</p>
-            )}
-          </div>
-        </section>
+        {/* Bottom Left: Speak button */}
+        <button
+          className={`speak-btn${isRecording && recordingMode === 'plain' ? ' active' : ''}`}
+          style={{ backgroundImage: `url(${speakBg})` }}
+          onClick={handleSpeakToggle}
+        >
+          <img src={micIcon} alt="Microphone" />
+          <span>Speak</span>
+        </button>
 
-        <section className="preview-panel">
-          <div className="preview-inner">
-            <video 
-              ref={videoRef} 
-              autoPlay 
-              playsInline 
-              muted 
-              onLoadedMetadata={() => videoRef.current && videoRef.current.play()}
-              style={{ width: '100%', height: '100%', objectFit: 'cover', visibility: isCameraRunning ? 'visible' : 'hidden' }}
-            />
-            {!isCameraRunning && (
-              <div className="preview-placeholder">
-                <CiCamera />
-                <p>Start the camera to view the live feed.</p>
-              </div>
-            )}
-          </div>
-        </section>
+        {/* Bottom Right: Scene Controls */}
+        <div
+          className="scene-controls-cont"
+          style={{ backgroundImage: `url(${sceneControlBg})` }}
+        >
+          <p className="scene-title">Scene Controls</p>
+
+          <button
+            className="scene-item-btn"
+            style={{ backgroundImage: `url(${sceneItemBg})` }}
+            onClick={() => handleAnalyze(false)}
+            disabled={!isCameraRunning || analysisLoading}
+          >
+            <img src={describeIcon} alt="" />
+            <span>Describe Scene</span>
+          </button>
+
+          <button
+            className="scene-item-btn"
+            style={{ backgroundImage: `url(${sceneItemBg})` }}
+            onClick={() => handleAnalyze(true)}
+            disabled={!isCameraRunning || analysisLoading}
+          >
+            <img src={descNSpeakIcon} alt="" />
+            <span>Describe &amp; Speak</span>
+          </button>
+
+          <button
+            className="scene-item-btn"
+            style={{ backgroundImage: `url(${sceneItemBg})` }}
+            onClick={handleSaveMemory}
+            disabled={!isCameraRunning || memoryLoading}
+          >
+            <img src={memoryIcon} alt="" />
+            <span>Save Memory</span>
+          </button>
+        </div>
       </div>
 
       {uiMessage && (
