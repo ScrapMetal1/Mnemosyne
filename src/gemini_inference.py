@@ -95,89 +95,50 @@ def _load_fastvlm():  # Define an internal function to load the FastVLM model co
     _model.eval()  # Set the model to evaluation mode (disables dropout, etc.)
 
 
-def describe_frame(frame: np.ndarray) -> str:  # Define the public function to generate a description for a given image frame
+def describe_frame(frame: np.ndarray) -> str:
     """
-    Generate a textual description of an OpenCV camera frame.
-
-
-    Note that the FastVLM processes a 1024x1024 image. That should be our target input.
+    Generate a textual description of an OpenCV camera frame using Gemini 2.0 Flash.
     """
-    _load_fastvlm()  # Ensure the model is loaded before processing
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        print("Error: GEMINI_API_KEY not found in environment variables.")
+        return "Error: Missing API Key"
 
-    # OpenCV BGR → PIL RGB
-    image = Image.fromarray(frame[:, :, ::-1]).convert("RGB")  # Convert the OpenCV BGR numpy array to a PIL RGB image
-
-    prompt_text = (  # Define the text prompt to guide the model's description
-        "Provide a detailed one-sentence summary of the scene, with regard to "
-        "key people and their clothing, and any specific items or text visible. "
-        "Be objective and concise. Avoid describing walls, floors, or empty space."
-    )
-
-    qs = (  # Construct the query string including special image tokens
-        DEFAULT_IM_START_TOKEN  # Start token for the image
-        + DEFAULT_IMAGE_TOKEN  # Placeholder token where the image embedding will go
-        + DEFAULT_IM_END_TOKEN  # End token for the image
-        + "\n"  # Newline separator
-        + prompt_text  # The actual text prompt
-    )
-
-    conv = conv_templates["qwen_2"].copy()  # Create a copy of the conversation template (using qwen_2 style)
-    conv.append_message(conv.roles[0], qs)  # Add the user's message (query) to the conversation history
-    conv.append_message(conv.roles[1], None)  # Add a placeholder for the assistant's response
-    prompt = conv.get_prompt()  # Generate the full formatted prompt string
-
-    device_obj = torch.device(_device)  # Create a torch.device object from the device string
-
-    input_ids = tokenizer_image_token(  # Tokenize the text prompt specially handling the image token
-        prompt,  # The full prompt string
-        _tokenizer,  # The tokenizer to use
-        IMAGE_TOKEN_INDEX,  # The index mapping for the image token
-        return_tensors="pt",  # Return PyTorch tensors
-    ).unsqueeze(0).to(device_obj)  # Add a batch dimension and move to the target device
-
-    image_tensor = process_images(  # Process the image to get the tensor input for the model
-        [image], _image_processor, _model.config  # Pass the image list, processor, and model config
-    )[0].unsqueeze(0)  # Select the first image result (batch of 1) and add a batch dimension
-
-    image_tensor = (  # Cast the image tensor to the appropriate data type
-        image_tensor.float() if _device == "cpu" else image_tensor.half()  # Use float32 for CPU, float16 (half) for GPU/MPS
-    ).to(device_obj)  # Move the tensor to the target device
-
-    with torch.inference_mode():  # Disable gradient calculation for faster inference
-        output_ids = _model.generate(  # Generate the output sequence from the model
-            input_ids,  # The tokenized text input
-            images=image_tensor,  # The processed image input
-            image_sizes=[image.size],  # The size of the original image
-            do_sample=False,  # deterministic generation
-            temperature=0.7, # this doesn't matter if sample is set to false
-            max_new_tokens=128,  # Maximum number of tokens to generate
-            use_cache=True,  # Enable KV caching for speed
-            repetition_penalty=1.1, # Help stop the model from looping on the same words
-
+    try:
+        from google import genai
+        from google.genai import types
+        import cv2
+        import base64
+        
+        client = genai.Client(api_key=api_key)
+        
+        # Convert OpenCV frame (BGR) to JPG bytes
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        
+        # We can pass raw bytes directly to the new Gemini SDK by wrapping in a Part
+        image_part = types.Part.from_bytes(
+            data=buffer.tobytes(),
+            mime_type='image/jpeg'
         )
-
-    output_text = _tokenizer.batch_decode(
-        output_ids, skip_special_tokens=True
-    )[0].strip()
-
-    # Clean up artifacts like <start>, <end>, or other special markers
-    stop_words = [
-        "<|im_end|>", "<|im_start|>", "<end>", "<start>",
-        "<end of description>", "<start of description>",
-        "<end of im_end>", "<im_end>", "<im_start>",
-        "<end of response>", "<start of response>", 
-        "Question:", "Answer:", "User:", "Assistant:", "###", "Context:", "\n"
-    ]
-    for stop in stop_words:
-        if stop in output_text:
-            output_text = output_text.split(stop)[0]
-
-    # Handle <Instruction> / <Response> artifacts
-    if "<Response:" in output_text:
-        # Take everything after <Response: 
-        output_text = output_text.split("<Response:")[1].strip()
-        # Remove trailing '>' if it exists (though usually it's just text)
-        if output_text.endswith(">"):
-            output_text = output_text[:-1]
-
-    return output_text.strip()
+        
+        prompt_text = (
+            "Provide a short one paragraph summary of the scene, followed by a brief list of "
+            "key people and their clothing, and any specific items or text visible. "
+            "Be objective and concise. Avoid describing walls, floors, or empty space."
+        )
+        
+        # Use gemini-2.5-flash which is Google's extremely fast and capable multimodal model
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[image_part, prompt_text],
+            config=types.GenerateContentConfig(
+                 max_output_tokens=1000,
+                 temperature=0.4,
+            )
+        )
+        
+        return response.text.strip()
+        
+    except Exception as e:
+        print(f"Error calling Gemini Vision API: {e}")
+        return f"Error: {e}"

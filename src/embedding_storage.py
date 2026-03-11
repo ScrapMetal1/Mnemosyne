@@ -261,52 +261,45 @@ class EmbeddingStore:
         self.save()
 
 
+import os 
+from google import genai
+from google.genai import types
+
 class EmbeddingExtractor:
     """
-    Responsible for generating embeddings from text.
-    Decoupled from storage so you can swap models (FastVLM, Qwen embeddings, etc.).
+    Responsible for generating embeddings from text using Gemini 2.0.
     """
 
-    def __init__(self, model_name="all-MiniLM-L6-v2", model=None, tokenizer=None, device="cuda"):
+    def __init__(self, model_name="gemini-embedding-001", model=None, tokenizer=None, device="cuda"):
         """
         Args:
-            model_name: Name of sentence-transformer model (default: all-MiniLM-L6-v2)
-            model: Optional existing LLM (fallback)
-            tokenizer: Optional existing tokenizer (fallback)
+            model_name: Name of the Gemini embedding model
             device: Device to run on
         """
-
-        self.use_sentence_transformer = False
-        self.device = device
-        
-        if HAS_SENTENCE_TRANSFORMERS and model_name: 
-            try: 
-                print(f"Loading Embedding model: {model_name}...")
-                self.st_model = SentenceTransformer(model_name, device=device)
-                self.use_sentence_transformer = True
-                print(" Embedding Model Loaded" )
-                return
-            except Exception as e: 
-                print(f"Warning: Could not load {model_name}")
-
-
-        #fallback to using the LLM as an embedding model. Not recommended.         
-        self.model = model  # this is an argument you pass in in the CLI
-        self.tokenizer = tokenizer
-
-        if not self.model:
-            print("Warning: No embedding model available. Pass 'model' and 'tokenizer' or install sentence-transformers.")
-
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+             print("Warning: GEMINI_API_KEY not found in environment variables. Embeddings will fail.")
+             
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = model_name
+        self.use_openai = False
+        print(f"Loading Gemini Embedding model: {model_name}...")
 
     def extract_embeddings(self, text: str) -> np.ndarray:
         """
-        Extract embedding from text.
+        Extract embedding from text using Gemini.
         """
-
-        # Use all-MiniLM embedding model
-        if self.use_sentence_transformer:
-            embedding = self.st_model.encode(text, convert_to_numpy=True, normalize_embeddings=True)
-            return embedding
+        # The new Google GenAI SDK returns embeddings in response.embeddings[0].values
+        response = self.client.models.embed_content(
+            model=self.model_name,
+            contents=text,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_DOCUMENT", # Optimizes the vector specifically for database storage
+                output_dimensionality=1536      # Truncates down to match standard DB sizes!
+            )
+        )
+        embedding = np.array(response.embeddings[0].values)
+        return embedding
         
 
 

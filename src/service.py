@@ -1,461 +1,498 @@
-# Disable MKL to avoid OpenMP runtime conflicts on Windows
-import os
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
-import time
-import base64
-import logging
-import cv2
-import numpy as np
+# embedding_storage.py
+from datetime import datetime
 import json
-import threading
-import queue
-import concurrent.futures
-import re
+from typing import List, Dict, Optional, Tuple, Union
+import numpy as np
+from pathlib import Path
+import torch
 
-from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, request, stream_with_context
-from flask_cors import CORS
-from openai import OpenAI
+# Try importing sentence_transformers, handle if missing
+try:
+    from sentence_transformers import SentenceTransformer
+    HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    HAS_SENTENCE_TRANSFORMERS = False
 
-from embedding_storage import EmbeddingStore, EmbeddingExtractor
-from fastvlm_inference import describe_frame, _load_fastvlm
-from filtering import requires_memory_recall, extract_time_filter
- 
 
-load_dotenv()
 
-client_ai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-app = Flask(__name__)
-CORS(app)
 
-# Suppress Flask/Werkzeug request logging
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.WARNING)
-
-#instantiate the classes
-extractor = EmbeddingExtractor()
-storage = EmbeddingStore()
-
-# Ensure the image storage directory exists
-IMAGE_DIR = os.path.join(storage.storage_dir, "images")
-os.makedirs(IMAGE_DIR, exist_ok=True)
-
-#load fastvlm
-_load_fastvlm()
-
-def _elapsed_ms(start_time):
-    return (time.perf_counter() - start_time) * 1000
-
-def record_metric(metrics, key, start_time=None, value=None):
-    if metrics is None:
-        return
-    if start_time is not None:
-        metrics[key] = _elapsed_ms(start_time)
-    elif value is not None:
-        metrics[key] = value
-
-def base64_to_cv2(base64_string):
-    img_data = base64.b64decode(base64_string)
-    nparr = np.frombuffer(img_data, np.uint8)
-    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-def call_openai_vision_api(frame, user_question=None, metrics=None):
+##
+class EmbeddingStore:
     """
-    Send current camera frame to OpenAI Vision API for scene analysis.
+    Stores embeddings + metadata, supports adding, deleting, searching.
+    Designed to be lightweight and portable for NPU/MPU.
     """
-    try:
-        encode_start = time.perf_counter()
-        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        frame_base64 = base64.b64encode(buffer).decode('utf-8')
-        image_data_url = f"data:image/jpeg;base64,{frame_base64}"
-        encode_ms = _elapsed_ms(encode_start)
-        
-        if user_question:
-            record_metric(metrics, "vision_encode_ms", value=encode_ms)
-            print("Thinking with vision context...")
-        else:
-            record_metric(metrics, "image_encode_ms", value=encode_ms)
-        
-        if user_question:
-            text_prompt = f"The user asked: \"{user_question}\"\n\nAnswer their question based on what you see in this image. Be concise and helpful."
-            system_prompt = "You are a helpful assistant for a vision-impaired user. Answer their question using what you see in the image. Be concise and helpful."
-        else:
-            text_prompt = "Describe this scene concisely for a vision-impaired user. Focus on objects, people, text, and spatial layout."
-            system_prompt = "You are a helpful assistant."
-            
-        api_start = time.perf_counter()
-        messages = [{"role": "system", "content": system_prompt}, {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": text_prompt},
-                {"type": "image_url", "image_url": {"url": image_data_url}}
-            ]
-        }]
-        
-        # Note: the original used gpt-4.1-mini. Using gpt-4o-mini as fallback if needed.
-        try:
-            response = client_ai.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                max_tokens=200,
-            )
-        except Exception:
-            response = client_ai.chat.completions.create(
-                model="gpt-4-vision-preview",
-                messages=messages,
-                max_tokens=200,
-            )
-        
-        analysis = response.choices[0].message.content.strip()
-        elapsed_ms = _elapsed_ms(api_start)
-        record_metric(metrics, "vision_api_ms", value=elapsed_ms)
-        return analysis
-        
-    except Exception as exc:
-        error_msg = f"Error calling Vision API: {exc}"
-        print(error_msg)
-        return "I couldn't process the image."
 
-
-def get_ai_response_streaming(prompt):
-    """Returns a streaming generator for LLM response."""
-    print("Thinking (streaming)...")
-    
-    # Number of memories to retrieve. Defaults to 5 in the underlying EmbeddingStore if not provided.
-    top_k = 1
-
-    if requires_memory_recall(prompt):
-        print(f"\n[DEBUG] Memory recall triggered for prompt: '{prompt}'")
+    def __init__(self, storage_dir: str = "./embeddings_db"):
+        """ 
+        Initialize the store:
+        - storage_dir: folder for persistence
+        - embedding_dim: expected embedding size
+        - max_items: pre-allocate space for embeddings
+        """
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(exist_ok=True)
         
-        #Find a start time to Filter our for time
-        start_time = extract_time_filter(prompt)
-        if start_time:
-            print(f"[DEBUG] Applied time filter: > {start_time}")
+        # In-memory storage
+        self.embeddings = []
+        self.ids: List[str] = []
+        self.metadata: List[Dict] = []
+        self.num_items = 0
         
-        #Embed the prompt
-        prompt_embedding = extractor.extract_embeddings(prompt)
+        self.load()
 
-        #Search for relvent memories filtering out distant memories if requried. 
-        if start_time:
-            relevant_memories = storage.search(prompt_embedding, top_k=top_k, filter={'start_time': start_time})
-        else:
-            relevant_memories = storage.search(prompt_embedding, top_k=top_k)
+    def load(self):
+        embeddings_file = self.storage_dir / "embeddings.npy"
+        metadata_file = self.storage_dir / "metadata.json"
 
-        print(f"[DEBUG] Found {len(relevant_memories)} relevant memories.")
-
-        context_str = ""
-        retrieved_images = [] # We'll store any base64 images we find here
+        if embeddings_file.exists():
+            # Load embeddings as numpy array
+            self.embeddings = np.load(embeddings_file, allow_pickle=True).tolist()
+            self.embeddings = [np.array(e) for e in self.embeddings]
         
-        for i, mem in enumerate(relevant_memories):
-            print(f"  [{i+1}] Memory ID: {mem['id']} | Similarity: {mem.get('similarity', 0.0):.4f} | Text: '{mem['text']}'")
-            context_str += f"- {mem['text']} (at {mem['timestamp']})\n"
-            
-            # 1. Look for the corresponding image on disk using the memory's ID
-            image_path = os.path.join(IMAGE_DIR, f"{mem['id']}.jpg")
-            if os.path.exists(image_path):
-                print(f"      -> Found corresponding image on disk")
-                # 2. If the file exists, read it from the disk
-                img = cv2.imread(image_path)
+        if metadata_file.exists():
+            with open(metadata_file, 'r') as f:
+                data = json.load(f)
+                self.metadata = data.get('metadata', [])
+                self.ids = data.get('ids', [])
                 
-                # 3. Convert the cv2 image back into a base64 string so we can send it to OpenAI
-                _, buffer = cv2.imencode('.jpg', img)
-                img_base64 = base64.b64encode(buffer).decode('utf-8')
-                retrieved_images.append(img_base64)
-            else:
-                print(f"      -> No image found on disk for this memory")
+    def add(self, embedding: np.ndarray, text: str, metadata: Optional[Dict] = None, memory_id: Optional[str] = None) -> str:
+        """
+        Add an embedding to the store.
+        Returns the unique memory_id.
+        """
+        if isinstance(embedding, torch.Tensor):
+            embedding = embedding.detach().cpu().numpy()
+        embedding = np.array(embedding).flatten()
 
-        system_prompt = "You are a helpful personal assistant with access to past memories. Be concise in your response"
-        if context_str:
-            system_prompt += f"\n\nCONTEXT FROM MEMORY:\n{context_str}"
-    else: 
-        print(f"\n[DEBUG] Memory recall NOT triggered for prompt: '{prompt}'")
-        system_prompt = "You are a helpful personal assistant. Be concise in your response"
-        retrieved_images = []
-
-    # Prepare the user content payload
-    # By default, we always send the text prompt
-    user_content = [{"type": "text", "text": prompt}]
-    
-    # If we retrieved any images from memory, attach them to the payload!
-    for img_b64 in retrieved_images:
-        user_content.append({
-            "type": "image_url", 
-            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
+        # Normalize embedding
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+            
+        if memory_id is None:
+            memory_id = f"memory_{datetime.now().timestamp()}_{len(self.ids)}"
+        
+        # Store the embedding now
+        self.embeddings.append(embedding)
+        self.ids.append(memory_id)
+        self.metadata.append({
+            'text': text,
+            'timestamp': datetime.now().isoformat(),
+            'id': memory_id,
+            **(metadata or {})
         })
+        self.save()
+        return memory_id
 
-    try:
-        stream = client_ai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                # We send the array of text+images if we have images, otherwise just send the prompt string
-                {"role": "user", "content": user_content if len(user_content) > 1 else prompt},
-            ],
-            stream=True,
-        )
-        return stream
-    except Exception as e:
-        print(f"[ERROR] Error creating stream: {e}")
-        raise
+    def delete(self, memory_id: str) -> bool:
+        """
+        Delete a stored embedding by ID.
+        Returns True if deleted.
+        """
+        if memory_id not in self.ids:
+            return False
+        
+        idx = self.ids.index(memory_id)
+        del self.embeddings[idx]
+        del self.metadata[idx]
+        del self.ids[idx]
 
-def get_ai_response_with_vision_streaming(voice_text, frame):
-    """Returns a streaming generator for Vision API response."""
-    print("Thinking with vision context (streaming)...")
+        self.save()
+        return True
+
+
+    def _parse_timestamp(self, timestamp_str):
+
+        """
+        Helper function for search
+        """
+        try: 
+            return datetime.fromisoformat(timestamp_str) 
+        except:
+            return datetime.min #forever ago. takes all memeories 
     
-    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    frame_base64 = base64.b64encode(buffer).decode('utf-8')
-    image_data_url = f"data:image/jpeg;base64,{frame_base64}"
-    
-    text_prompt = f"The user asked: \"{voice_text}\"\n\nAnswer their question based on what you see in this image. Be concise and helpful."
-    
-    try:
-        stream = client_ai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant for a vision-impaired user. Answer their question using what you see in the image. Be concise and helpful."
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": text_prompt},
-                        {"type": "image_url", "image_url": {"url": image_data_url}}
-                    ]
-                }
-            ],
-            max_tokens=200,
-            stream=True,
-        )
-        return stream
-    except Exception as e:
-        print(f"[ERROR] Error creating vision stream: {e}")
-        raise
-
-## MEMORY FUNCTIONS
-
-def capture_memory_snapshot(frame_base64):
-    try:        
-        frame = base64_to_cv2(frame_base64)
+    def search(self, query_embedding: np.ndarray, top_k: int = 5, threshold: float = 0.0, filter: Optional[Dict] = None ) -> List[Dict]:
+        """
+        Search for similar embeddings using cosine similarity.
         
-        ## DEBUG: Save the frame to disk to verify what the backend is seeing
-        #cv2.imwrite("debug_latest_memory.jpg", frame)
+        Args:
+            query_embedding: numpy array of query embedding
+            top_k: number of results to return
+            threshold: minimum similarity threshold (0.0 to 1.0)
+            metadata_filter: optional metadata filter dict
+        
+        Returns:
+            List of result dicts with 'text', 'metadata', 'similarity', 'id'
+        """
+        
+        #check if the storage is not empty
+        if len(self.embeddings) == 0:
+            return []
+        
 
-        describe_start = time.time()
-        description = describe_frame(frame)  #fastvlm inference
-        describe_end = time.time()
-        print(f"FastVLM describe time: {(describe_end-describe_start) * 1000:.2f}ms")
-        
-        embed_start = time.time()
-        embedding = extractor.extract_embeddings(description)
-        embed_end = time.time()
-        
-        store_start = time.time()
-        #Save the embedding and get the unique memory_id (e.g. memory_17000000_1)
-        memory_id = storage.add(embedding=embedding, text=description) 
-        
-        #Save the image to the disk using the memory_id as the filename.
-        #This writes the cv2 'frame' out as a .jpg file in the IMAGE_DIR folder we made at the top.
-        image_path = os.path.join(IMAGE_DIR, f"{memory_id}.jpg")
-        cv2.imwrite(image_path, frame)
-        store_end = time.time()
+        #ensure the querys embedding is in numpy format
+        if isinstance(query_embedding, torch.Tensor):
+            #check if its is a tensor. if it is then convert to numpy
+            query_embedding = query_embedding.detach().cpu().numpy()
+            
+            #squash into 1d array
+            query_embedding = np.array(query_embedding).flatten()
+            
+            
+            #normalise
+            norm = np.linalg.norm(query_embedding)
+            
+            
+            # Handle zero vector edge case
+            if norm > 0:
+                query_embedding = query_embedding / norm
+            else:
+                return [] 
 
+        #turns all the embeddings into a 2d numpy matrix. 
+        embeddings_array = np.array(self.embeddings)
+
+        
+        #TIME FILTER
+
+        valid_mask = [True] * len(self.embeddings) # boolean list 
+
+        if filter and "start_time" in filter:
+
+            start_time = filter["start_time"]
+
+            for i, memory in enumerate(self.metadata): #create counter
+                item_time = self._parse_timestamp(memory['timestamp'])
+
+
+                if item_time < start_time:
+                    valid_mask[i] = False
+            
+        valid_mask = np.array(valid_mask)
+        
+        
+        
+
+
+        #filter the emebeddings
+
+        filtered_embeddings = embeddings_array[valid_mask]
+
+
+
+        # use cosine similarty to match against embedding int the database. returns a nmpy array with all the similiarty scores for each embedding. 
+        similarities = np.dot(filtered_embeddings, query_embedding)
+        
+        #make sure we keep the indicies consistent so we can find the correspoindng text
+        all_indices = np.arange(len(self.embeddings))
+
+        valid_indices = all_indices[valid_mask]
+
+        # Filter by threshold
+        above_threshold = similarities >= threshold
+        valid_indices = valid_indices[above_threshold]
+        similarities = similarities[above_threshold] 
+        
+        # Get top_k results
+        if len(similarities) == 0:
+            return []
+        
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+        
+        # Build results
+        results = []
+        for idx in top_indices:
+            original_idx = valid_indices[idx]
+            results.append({
+                'id': self.ids[original_idx],
+                'text': self.metadata[original_idx]['text'],
+                #'metadata': self.metadata[original_idx], just repeats text and id
+                'similarity': float(similarities[idx]),
+                'timestamp': self.metadata[original_idx]['timestamp']
+            }) 
+        
+        return results
+
+
+    def save(self):
+        """
+        Persist embeddings and metadata to disk.
+        """
+        embeddings_file = self.storage_dir / "embeddings.npy"
+        metadata_file = self.storage_dir / "metadata.json"
+
+        np.save(embeddings_file, np.array(self.embeddings, dtype=object), allow_pickle=True)
+
+        with open(metadata_file, 'w') as f:
+            json.dump({
+                'metadata': self.metadata,
+                'ids': self.ids
+            }, f, indent=2)
+
+    def get_by_id(self, memory_id: str) -> Optional[Dict]:
+        """
+        Retrieve embedding and metadata by memory_id.
+        """
+        if memory_id not in self.ids:
+            return None
+        idx = self.ids.index(memory_id)
         return {
-            "status": "success",
-            "description": description, 
-            "FastVLM describe time": (describe_end - describe_start) * 1000,
-            "Embedding_time_ms": (embed_end - embed_start) * 1000,
-            "Store Time:": (store_end - store_start) * 1000
+            "id": self.ids[idx],
+            "metadata": self.metadata[idx],
+            "embedding": self.embeddings[idx],
+            "text": self.metadata[idx]["text"]
         }
 
-    except Exception as e:
-        print(f"Manual Memory Capture Error: {e}")
-        return {"status": "error", "message": str(e)}
+    def count(self) -> int:
+        """
+        Return total number of stored embeddings.
+        """
+        return len(self.ids)
 
-# ==== ROUTES: CAMERA =========================================================
+    def clear(self):
+        """
+        Remove all stored embeddings.
+        """
+        self.embeddings.clear()
+        self.metadata.clear()
+        self.ids.clear()
+        self.save()
 
-# The frontend manages the camera locally now. These stub endpoints are left just in case.
-@app.route("/api/camera/start", methods=["POST"])
-def start_camera():
-    return jsonify({"status": "success", "message": "Handled locally by frontend", "metrics": {}})
 
-@app.route("/api/camera/stop", methods=["POST"])
-def stop_camera():
-    return jsonify({"status": "success", "message": "Handled locally by frontend", "metrics": {}})
+import os 
+from google import genai
+from google.genai import types
 
-@app.route("/api/camera/status", methods=["GET"])
-def camera_status():
-    return jsonify({"is_running": True, "metrics": {}})
+class EmbeddingExtractor:
+    """
+    Responsible for generating embeddings from text using Gemini 2.0.
+    """
 
-@app.route("/api/scene/analyze", methods=["POST"])
-def analyze_scene():
-    payload = request.get_json(silent=True) or {}
-    image_base64 = payload.get("image")
-    speak_flag = bool(payload.get("speak"))
+    def __init__(self, model_name="gemini-embedding-001", model=None, tokenizer=None, device="cuda"):
+        """
+        Args:
+            model_name: Name of the Gemini embedding model
+            device: Device to run on
+        """
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+             print("Warning: GEMINI_API_KEY not found in environment variables. Embeddings will fail.")
+             
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = model_name
+        self.use_openai = False
+        print(f"Loading Gemini Embedding model: {model_name}...")
+
+    def extract_embeddings(self, text: str) -> np.ndarray:
+        """
+        Extract embedding from text using Gemini.
+        """
+        # The new Google GenAI SDK returns embeddings in response.embeddings[0].values
+        response = self.client.models.embed_content(
+            model=self.model_name,
+            contents=text,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_DOCUMENT", # Optimizes the vector specifically for database storage
+                output_dimensionality=1536      # Truncates down to match standard DB sizes!
+            )
+        )
+        embedding = np.array(response.embeddings[0].values)
+        return embedding
+        
+
+
+# Integration example
+def create_memory_system(model, tokenizer, storage_dir="./embeddings_db"):
+    """
+    Create a complete memory system with FastVLM and embedding storage.
+    """
+    extractor = EmbeddingExtractor(model, tokenizer)
+    store = EmbeddingStore(storage_dir)
     
-    metrics = {}
-    if not image_base64:
-        return jsonify({"status": "error", "message": "No image provided"}), 400
-        
-    frame = base64_to_cv2(image_base64)
-    analysis = call_openai_vision_api(frame, metrics=metrics)
-    
-    return jsonify({"analysis": analysis, "spoken": speak_flag, "metrics": metrics})
+    return extractor, store
 
 
-# ==== ROUTES: VOICE ==========================================================
-
-@app.route("/api/voice/process", methods=["POST"])
-def process_voice():
-    pipeline_start = time.perf_counter()
-    metrics = {}
-
-    audio_file = request.files.get("audio")
-    mode = request.form.get("mode", "plain")
-    image_base64 = request.form.get("image")
-
-    if not audio_file:
-        return jsonify({"status": "error", "message": "No audio provided"}), 400
-
-    # Preserve the original file extension (e.g., .webm or .mp4) sent by the browser
-    ext = os.path.splitext(audio_file.filename)[1]
-    if not ext:
-        ext = ".webm"
-        
-    temp_path = f"temp_upload{ext}"
-    audio_file.save(temp_path)
-
-    # 1. Transcription (Whisper API)
-    try:
-        transcribe_start = time.perf_counter()
-        with open(temp_path, "rb") as f:
-            transcript_res = client_ai.audio.transcriptions.create(model="whisper-1", file=f)
-        user_text = transcript_res.text
-        metrics["transcription_ms"] = _elapsed_ms(transcribe_start)
-    except Exception as e:
-        print(e)
-        return jsonify({"status": "error", "message": f"Transcription failed: {e}"}), 500
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-            
-    if not user_text:
-         return jsonify({"status": "success", "message": "No speech detected"}), 200
-
-    print(f"User said: {user_text}")
-
-    # 2. Get AI Response Streaming
-    llm_start = time.perf_counter()
-    if mode == "scene" and image_base64:
-        frame = base64_to_cv2(image_base64)
-        llm_generator = get_ai_response_with_vision_streaming(user_text, frame)
-    else:
-        llm_generator = get_ai_response_streaming(user_text)
-
-    def generate_sse():
-        # Yield the transcript first
-        yield f"data: {json.dumps({'type': 'transcript', 'text': user_text})}\n\n"
-
-        # Queue to pass (text_chunk, tts_future) from background thread to main generator
-        out_queue = queue.Queue()
-        # Thread pool to fetch TTS concurrently
-        tts_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
-
-        def fetch_tts(text_chunk):
-            """Runs in background thread pool to fetch audio"""
-            try:
-                audio_response = client_ai.audio.speech.create(
-                    model="tts-1",
-                    voice="alloy",
-                    input=text_chunk,
-                    response_format="mp3"
-                )
-                return base64.b64encode(audio_response.content).decode('utf-8')
-            except Exception as e:
-                print(f"TTS Error on chunk: {e}")
-                return None
-
-        def llm_worker():
-            """Runs in a background thread to consume the LLM stream without blocking"""
-            buffer = ""
-            full_response_parts = []
-            
-            for chunk in llm_generator:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta.content or ""
-                if not delta:
-                    continue
-                
-                full_response_parts.append(delta)
-                buffer += delta
-                
-                parts = re.split(r'(?<=[.?!,])\s+', buffer)
-                if len(parts) > 1:
-                    for part in parts[:-1]:
-                        text_chunk = part.strip()
-                        if text_chunk:
-                            # Start TTS generation IMMEDIATELY in parallel
-                            future = tts_executor.submit(fetch_tts, text_chunk)
-                            out_queue.put(("chunk", text_chunk, future))
-                    
-                    buffer = parts[-1]
-
-            # Flush remaining buffer
-            if buffer.strip():
-                text_chunk = buffer.strip()
-                future = tts_executor.submit(fetch_tts, text_chunk)
-                out_queue.put(("chunk", text_chunk, future))
-
-            # Signal completion
-            out_queue.put(("done", "".join(full_response_parts), None))
-
-        # Start LLM processing in the background
-        threading.Thread(target=llm_worker).start()
-
-        # Main thread consumes the queue and yields SSEs in order
-        while True:
-            msg_type, content, future = out_queue.get()
-            
-            if msg_type == "done":
-                metrics["pipeline_total_ms"] = _elapsed_ms(pipeline_start)
-                yield f"data: {json.dumps({'type': 'done', 'metrics': metrics, 'full_response': content})}\n\n"
-                break
-            
-            # 1. Yield text immediately so frontend can display it instantly
-            yield f"data: {json.dumps({'type': 'text', 'text': content})}\n\n"
-            
-            # 2. Wait for the TTS generation for THIS specific chunk to finish
-            if future:
-                audio_b64 = future.result() 
-                if audio_b64:
-                    yield f"data: {json.dumps({'type': 'audio', 'audio': audio_b64})}\n\n"
-
-        tts_executor.shutdown(wait=False)
-
-    return Response(stream_with_context(generate_sse()), mimetype='text/event-stream')
-
-@app.route("/api/voice/stop-speech", methods=["POST"])
-def api_stop_speech():
-    # Because speech is played on the frontend now, backend has nothing to stop
-    return jsonify({
-        "status": "success",
-        "message": "Speech playback stopped on frontend.",
-        "metrics": {"operation_ms": 0.0},
-    })
-
-
-@app.route("/api/memory/capture", methods=["POST"])
-def manual_capture():
-    payload = request.get_json(silent=True) or {}
-    image_base64 = payload.get("image")
-    if not image_base64:
-        return jsonify({"status": "error", "message": "No image provided"}), 400
-        
-    return jsonify(capture_memory_snapshot(image_base64))
-
-
+# Usage example
 if __name__ == "__main__":
-    app.run(debug=True, port=5000, threaded=True, host='0.0.0.0')
+    import sys
+    import os
+    import argparse
+    import tempfile
+    import shutil
+    from llava.model.builder import load_pretrained_model
+    from llava.mm_utils import get_model_name_from_path
+    from llava.utils import disable_torch_init
+
+    print("=" * 70)
+    print("COMPREHENSIVE EMBEDDING STORAGE TEST")
+    print("=" * 70)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-path", type=str, default=None, help="Path to model checkpoint for VLM fallback testing")
+    args = parser.parse_args()
+    
+    # Create test directory in current folder
+    temp_dir = "./test_embeddings_db"
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir)
+    
+    print(f"\nUsing storage directory: {temp_dir}")
+    
+    try:
+        # Initialize Extractor - Prefer SentenceTransformers
+        if HAS_SENTENCE_TRANSFORMERS:
+             print("\n[Init] Using SentenceTransformer (all-MiniLM-L6-v2)...")
+             extractor = EmbeddingExtractor(model_name="all-MiniLM-L6-v2")
+        elif args.model_path:
+            print(f"\n[Init] Loading VLM from {args.model_path} for embeddings...")
+            disable_torch_init()
+            model_name = get_model_name_from_path(args.model_path)
+            tokenizer, model, image_processor, context_len = load_pretrained_model(
+                args.model_path, 
+                None, 
+                model_name
+            )
+            extractor = EmbeddingExtractor(model=model, tokenizer=tokenizer)
+            print("✓ Real model loaded")
+        else:
+            print("\n[Error] No SentenceTransformers installed and no --model-path provided.")
+            print("        Cannot run tests with real embeddings.")
+            sys.exit(1)
+
+        # Initialize components 
+        store = EmbeddingStore(storage_dir=temp_dir)
+        
+        print("\n" + "-" * 70)
+        print("STEP 1: Adding distinct text descriptions to storage")
+        print("-" * 70)
+        
+        # Define distinct text descriptions with varying detail levels
+        descriptions = [
+            "House keys located on the marble island countertop next to the fruit bowl.",
+            "A large crimson chesterfield sofa facing a flat-screen television mounted above the fireplace. A cinema room",
+            "An open MacBook Pro sitting on a vintage oak writing desk near the bay window.",
+            "A modern standing desk equipped with dual monitors and a mechanical keyboard.",
+            "A ceramic basin with a large vanity mirror and toothbrush holder.",
+            # Distractors
+            "Outdoor area with an grey shed locked with a masterlock padlock", # Distractor for keys
+            "A wooden bench in the hallway.", # Distractor for sitting
+            "A broken calculator in the trash." # Distractor for tech
+        ]
+        
+        memory_ids = []
+        # Store expected index for simple verification
+        stored_texts = [] 
+        
+        for i, text in enumerate(descriptions):
+            print(f"\n[{i+1}] Adding: {text}")
+            embedding = extractor.extract_embeddings(text) #get the embedding 
+            memory_id = store.add(
+                embedding=embedding,
+                text=text,
+                metadata={"index": i} # Store index to verify later
+            )
+            memory_ids.append(memory_id)
+            stored_texts.append(text)
+            print(f"    ✓ Stored with ID: {memory_id}")
+        
+        print(f"\n✓ Total memories stored: {store.count()}")
+        
+        print("\n" + "-" * 70)
+        print("STEP 2: Testing search functionality with queries")
+        print("-" * 70)
+        
+        # Define test queries mapped to the expected index of the description
+        test_queries = [
+            # Semantic query for keys (avoiding word "keys" if possible, or context specific)
+            ("I need to unlock the front door to my house", 0), 
+            # Semantic query for sofa (avoiding "sofa", using "relax", "watch")
+            ("Where can I sit down and watch a movie?", 1),
+            # Semantic query for laptop (using "portable computer", "work")
+            ("Where is my portable computer?", 2),
+            # Semantic query for office (using "workstation", "screens")
+            ("Where is the workstation with multiple displays?", 3),
+            # Semantic query for bathroom (using function "brush teeth", "wash face")
+            ("Where can I brush my teeth?", 4)
+        ]
+        
+        all_passed = True
+        for i, (query, expected_index) in enumerate(test_queries):
+            print(f"\n[{i+1}] Query: \"{query}\"")
+            
+            # Extract query embedding
+            query_embedding = extractor.extract_embeddings(query)
+            
+            # Search with top_k=1
+            results = store.search(query_embedding, top_k=1)
+            
+            if len(results) == 0:
+                print("    ✗ FAILED: No results returned")
+                all_passed = False
+                continue
+            
+            result = results[0]
+            # Get the original index we stored in metadata
+            found_index = result['metadata'].get('index')
+            
+            print(f"    ✓ Found match:")
+            print(f"      Text: {result['text']}")
+            print(f"      Similarity: {result['similarity']:.4f}")
+            
+            if found_index == expected_index:
+                 print(f"    ✓ PASSED: Correctly matched index {expected_index}")
+            else:
+                 print(f"    ✗ FAILED: Expected index {expected_index} ({descriptions[expected_index]}), but got {found_index} ({result['text']})")
+                 all_passed = False
+ 
+            # Verify that we got a result with reasonable similarity
+            if result['similarity'] <= 0.0:
+                print(f"    ✗ FAILED: Similarity too low: {result['similarity']:.4f}")
+                all_passed = False
+        
+        print("\n" + "-" * 70)
+        print("STEP 3: Testing edge cases")
+        print("-" * 70)
+        
+        # Test empty search
+        print("\n[Edge Case 1] Searching empty store...")
+        empty_store = EmbeddingStore(storage_dir=tempfile.mkdtemp())
+        empty_results = empty_store.search(query_embedding, top_k=1)
+        assert len(empty_results) == 0, "Empty store should return no results"
+        print("    ✓ PASSED: Empty store returns no results")
+        
+        # Test get_by_id
+        print(f"\n[Edge Case 2] Retrieving memory by ID...")
+        retrieved = store.get_by_id(memory_ids[0])
+        assert retrieved is not None, "Should retrieve memory by ID"
+        assert retrieved['text'] == descriptions[0], "Retrieved text should match"
+        print(f"    ✓ PASSED: Retrieved memory: {retrieved['text'][:60]}...")
+        
+        # Test delete
+        print(f"\n[Edge Case 3] Deleting a memory...")
+        count_before = store.count()
+        deleted = store.delete(memory_ids[-1])
+        assert deleted, "Delete should return True"
+        assert store.count() == count_before - 1, "Count should decrease after delete"
+        print(f"    ✓ PASSED: Memory deleted, count: {count_before} → {store.count()}")
+        
+        # Test persistence
+        print(f"\n[Edge Case 4] Testing persistence...")
+        count_before_reload = store.count()
+        reloaded_store = EmbeddingStore(storage_dir=temp_dir)
+        assert reloaded_store.count() == count_before_reload, "Count should persist"
+        print(f"    ✓ PASSED: Store persisted, count: {reloaded_store.count()}")
+        
+        print("\n" + "=" * 70)
+        if all_passed:
+            print("✓ ALL TESTS PASSED!")
+        else:
+            print("✗ SOME TESTS FAILED - Check output above")
+        print("=" * 70)
+        
+    finally:
+        # Cleanup
+        # shutil.rmtree(temp_dir)
+        print(f"\nTest database left at: {temp_dir}")
