@@ -1,6 +1,6 @@
-# Mnemosyne
+# Omni AR
 
-Mnemosyne is a personal project with the goal of creating an AI assistant with perfect memory recall that eventually could be deployed onto smart glasses / AR Glasses for general users and people with disabilities. It features a React-based frontend for real-time webcam capture and voice assistant features, connected to a Python backend handling vision analysis, text-to-speech, and memory extraction.
+Omni AR is an MDN project with the goal of creating an AI assistant with perfect memory recall that eventually could be deployed onto smart glasses / AR Glasses for general users and people with disabilities. It features a React-based frontend for real-time webcam capture and voice assistant features, connected to a Python backend handling vision analysis, text-to-speech, and memory extraction.
 
 ---
 
@@ -9,8 +9,8 @@ Mnemosyne is a personal project with the goal of creating an AI assistant with p
 1. **Clone** the repo
 
    ```bash
-   git clone https://github.com/ScrapMetal1/Mnemosyne.git
-   cd Mnemosyne
+   git clone https://github.com/ScrapMetal1/Omni AR.git
+   cd Omni AR
    ```
 2. **Set up environment variables** (see [API Keys Setup](#api-keys-setup))
 3. **Create the conda environment** (see [Environment Setup](#environment-setup))
@@ -190,7 +190,7 @@ In your browser, you will see the **MDN Assist** interface:
 ## Project Structure
 
 ```
-Mnemosyne/
+Omni AR/
 ├── environment.yml          # Conda environment configuration
 ├── .env                     # Environment variables (API keys) - NOT committed
 ├── README.md                # This file
